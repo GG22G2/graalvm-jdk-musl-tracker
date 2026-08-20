@@ -1,0 +1,87 @@
+name: build-service
+
+# 构建即服务：外部传入源码下载链接 + 产物密码（走 Secrets，不经过 inputs/日志），
+# 在 GraalVM 镜像里执行 Maven 构建，产物 AES-256 加密后上传 artifact。
+#
+# 触发方式一（推荐）：持 PAT 者用 repository_dispatch，陌生人无法触发
+#   gh api repos/<owner>/<repo>/dispatches -f event_type=build-request \
+#     -f 'client_payload={"build_command":"mvn -B clean package","artifact_path":"target"}'
+# 触发方式二：网页手动 workflow_dispatch，需输入与 Secret BUILD_TOKEN 一致的触发口令
+
+on:
+  repository_dispatch:
+    types: [build-request]
+  workflow_dispatch:
+    inputs:
+      auth_token:
+        description: 触发口令（与仓库 Secret BUILD_TOKEN 一致）
+        required: true
+      build_command:
+        description: 构建命令
+        required: false
+        default: 'mvn -B clean package'
+      artifact_path:
+        description: 产物相对源码根目录的路径
+        required: false
+        default: 'target'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Authenticate (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          AUTH_INPUT: ${{ inputs.auth_token }}
+        run: |
+          [ "$AUTH_INPUT" = "${{ secrets.BUILD_TOKEN }}" ] || { echo "unauthorized"; exit 1; }
+
+      - name: Resolve params
+        id: params
+        env:
+          BC_D: ${{ inputs.build_command }}
+          BC_R: ${{ github.event.client_payload.build_command }}
+          AP_D: ${{ inputs.artifact_path }}
+          AP_R: ${{ github.event.client_payload.artifact_path }}
+        run: |
+          echo "build_command=${BC_D:-${BC_R:-mvn -B clean package}}" >> "$GITHUB_OUTPUT"
+          echo "artifact_path=${AP_D:-${AP_R:-target}}" >> "$GITHUB_OUTPUT"
+          echo "params: build_command=... artifact_path=$(echo "${AP_D:-${AP_R:-target}}")"
+
+      - name: Download and extract source
+        run: |
+          mkdir -p src raw
+          curl -fL --retry 2 --max-time 600 -o /tmp/source.tar.gz "${{ secrets.BUILD_SRC_URL }}"
+          tar -xzf /tmp/source.tar.gz -C raw
+          # GitHub tarball 顶层多一层目录：若 raw 下只有一个目录，则取其内容为源码根
+          SRC=$(ls -A raw | head -1)
+          if [ -n "$SRC" ] && [ -d "raw/$SRC" ] && [ "$(ls -A raw | wc -l)" = "1" ]; then
+            cp -a "raw/$SRC/." src/
+          else
+            cp -a raw/. src/
+          fi
+          echo "source tree:" && ls -la src | head -20
+
+      - name: Build in GraalVM image
+        env:
+          BUILD_COMMAND: ${{ steps.params.outputs.build_command }}
+        run: |
+          docker run --rm -v "$PWD/src":/workspace \
+            ghcr.io/gg22g2/graalvm-jdk-musl-maven:latest \
+            sh -lc "cd /workspace && $BUILD_COMMAND"
+
+      - name: Package and encrypt
+        env:
+          ARTIFACT_PATH: ${{ steps.params.outputs.artifact_path }}
+          ZIP_PASS: ${{ secrets.BUILD_ZIP_PASSWORD }}
+        run: |
+          tar -czf /tmp/out.tar.gz -C src "$ARTIFACT_PATH"
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
+            -pass env:ZIP_PASS -in /tmp/out.tar.gz -out build-out.tar.gz.enc
+          ls -la build-out.tar.gz.enc
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: build-out.tar.gz.enc
+          retention-days: 7
