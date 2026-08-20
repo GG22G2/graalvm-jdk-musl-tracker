@@ -41,8 +41,11 @@ jobs:
               "https://ghcr.io/v2/graalvm/native-image-community/tags/list?n=1000",
               headers={"Authorization": "Bearer " + tok})
           tags = json.load(urllib.request.urlopen(req))["tags"]
-          pat = re.compile(r"^\d+i\d+-[\d.]+-muslib-ol10-\d{8}$")
+          # 匹配任何系列前缀的 *-muslib-ol10-YYYYMMDD（不锁死 25iN 命名，兼容上游命名演变）
+          pat = re.compile(r".*-muslib-ol10-\d{8}$")
           dated = [t for t in tags if pat.match(t)]
+          if not dated:
+              raise SystemExit("no muslib-ol10 dated tags found: upstream naming may have changed")
           print(max(dated, key=lambda t: (int(t.rsplit("-", 1)[1]), t)))
           PYEOF
           )
