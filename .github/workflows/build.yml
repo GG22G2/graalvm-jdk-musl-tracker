@@ -103,4 +103,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add built-tag.txt
-          git commit -m "build: $FULL" && git push || echo "no change to commit"
+          git commit -m "build: $FULL" || echo "no change to commit"
+          # 远端可能有其他提交（如网页编辑），先 rebase 再推；push 失败则让 job 显式失败
+          git pull --rebase origin main
+          git push
