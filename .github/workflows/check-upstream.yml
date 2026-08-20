@@ -1,0 +1,54 @@
+name: check-upstream
+
+on:
+  schedule:
+    # 每天北京时间 02:37（UTC 18:37）检查一次官方是否发布新镜像
+    - cron: '37 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with built tag and trigger build
+        id: compare
+        run: |
+          # 取官方 native-image-community 里最新的 *-muslib-ol10-YYYYMMDD 日期 tag
+          LATEST=$(python3 - <<'PYEOF'
+          import json, re, urllib.request
+          tok = json.load(urllib.request.urlopen(
+              "https://ghcr.io/token?scope=repository:graalvm/native-image-community:pull"))["token"]
+          req = urllib.request.Request(
+              "https://ghcr.io/v2/graalvm/native-image-community/tags/list?n=1000",
+              headers={"Authorization": "Bearer " + tok})
+          tags = json.load(urllib.request.urlopen(req))["tags"]
+          pat = re.compile(r"^\d+i\d+-[\d.]+-muslib-ol10-\d{8}$")
+          dated = [t for t in tags if pat.match(t)]
+          print(max(dated, key=lambda t: (int(t.rsplit("-", 1)[1]), t)))
+          PYEOF
+          )
+          BUILT=$(cat built-tag.txt 2>/dev/null || echo none)
+          echo "latest_upstream=$LATEST"
+          echo "built=$BUILT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          if [ "$LATEST" = "$BUILT" ]; then
+            echo "UP_TO_DATE"
+            echo "trigger=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "TRIGGER_BUILD_FOR=$LATEST"
+            echo "trigger=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger build workflow
+        if: steps.compare.outputs.trigger == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run build.yml -R "${{ github.repository }}" \
+            -f upstream_tag="${{ steps.compare.outputs.latest }}"
+          echo "build workflow triggered"

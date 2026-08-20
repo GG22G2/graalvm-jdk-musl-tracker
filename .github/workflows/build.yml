@@ -1,0 +1,103 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 官方 upstream tag（如 25i2-25.0.4-muslib-ol10-20260728）
+        required: false
+        default: ''
+
+env:
+  MAVEN_VERSION: 3.9.16
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve upstream tag
+        id: resolve
+        run: |
+          TAG="${{ inputs.upstream_tag }}"
+          if [ -z "$TAG" ]; then
+            # 手动触发且没传参时，取官方当前最新的 muslib-ol10 日期 tag
+            TAG=$(python3 - <<'PYEOF'
+          import json, re, urllib.request
+          tok = json.load(urllib.request.urlopen(
+              "https://ghcr.io/token?scope=repository:graalvm/native-image-community:pull"))["token"]
+          req = urllib.request.Request(
+              "https://ghcr.io/v2/graalvm/native-image-community/tags/list?n=1000",
+              headers={"Authorization": "Bearer " + tok})
+          tags = json.load(urllib.request.urlopen(req))["tags"]
+          pat = re.compile(r"^\d+i\d+-[\d.]+-muslib-ol10-\d{8}$")
+          dated = [t for t in tags if pat.match(t)]
+          print(max(dated, key=lambda t: (int(t.rsplit("-", 1)[1]), t)))
+          PYEOF
+          )
+          fi
+          SHORT_TAG="${TAG%-*}"   # 去掉日期段：25i2-25.0.4-muslib-ol10-20260728 -> 25i2-25.0.4-muslib-ol10
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT_TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$TAG"
+          echo "short_tag=$SHORT_TAG"
+
+      - name: Build image
+        env:
+          BASE_IMAGE: ghcr.io/graalvm/native-image-community:${{ steps.resolve.outputs.tag }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/graalvm-jdk-musl-maven
+        run: |
+          IMAGE_LOWER=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_LOWER=$IMAGE_LOWER" >> "$GITHUB_ENV"
+          docker build --build-arg BASE_IMAGE="$BASE_IMAGE" \
+                       --build-arg MAVEN_VERSION="$MAVEN_VERSION" \
+                       -t "$IMAGE_LOWER:ci-test" .
+
+      - name: Verify tools
+        run: |
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" java -version
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" native-image --version
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" mvn -version
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" git --version
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" pigz --version
+
+      - name: Smoke test (native-image build)
+        # GitHub runner 沙箱会拦截 SVM 临时 helper，不影响镜像本身；不阻断
+        continue-on-error: true
+        run: |
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" sh -lc 'cd /tmp \
+            && echo "public class Hello { public static void main(String[] a){ System.out.println(\"ok\"); } }" > Hello.java \
+            && javac Hello.java && native-image --no-fallback -cp . Hello && ./hello'
+
+      - name: Push image
+        env:
+          FULL: ${{ steps.resolve.outputs.tag }}
+          SHORT: ${{ steps.resolve.outputs.short }}
+        run: |
+          docker tag "$IMAGE_LOWER:ci-test" "$IMAGE_LOWER:$FULL"
+          docker tag "$IMAGE_LOWER:ci-test" "$IMAGE_LOWER:$SHORT"
+          docker tag "$IMAGE_LOWER:ci-test" "$IMAGE_LOWER:latest"
+          docker push "$IMAGE_LOWER:$FULL"
+          docker push "$IMAGE_LOWER:$SHORT"
+          docker push "$IMAGE_LOWER:latest"
+
+      - name: Record built tag
+        env:
+          FULL: ${{ steps.resolve.outputs.tag }}
+        run: |
+          echo "$FULL" > built-tag.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add built-tag.txt
+          git commit -m "build: $FULL" && git push || echo "no change to commit"
