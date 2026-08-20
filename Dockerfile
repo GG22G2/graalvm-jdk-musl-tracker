@@ -1,7 +1,11 @@
 # 自动跟踪 ghcr.io/graalvm/native-image-community 的 *-muslib-ol10 系列
 # 官方每次发布新日期 tag，check-upstream 工作流会自动触发本仓库构建，
 # 用与官方相同的 tag 名推送到 ghcr.io/gg22g2/graalvm-jdk-musl-maven。
-ARG BASE_IMAGE=ghcr.io/graalvm/native-image-community:25i2-25.0.4-muslib-ol10-20260728
+#
+# BASE_IMAGE 不设默认值：CI 构建时由 build.yml 运行时解析上游最新 tag
+# 通过 --build-arg 传入；本地手动构建必须显式指定，例如：
+#   docker build --build-arg BASE_IMAGE=ghcr.io/graalvm/native-image-community:25i2-25.0.4-muslib-ol10-20260728 .
+ARG BASE_IMAGE
 ARG MAVEN_VERSION=3.9.16
 FROM ${BASE_IMAGE}
 
