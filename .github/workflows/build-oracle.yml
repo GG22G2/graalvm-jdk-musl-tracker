@@ -1,0 +1,132 @@
+name: build-oracle
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Oracle 官方 upstream tag（如 25i2-25.0.4-muslib-ol10-20260728）
+        required: false
+        default: ''
+
+env:
+  MAVEN_VERSION: 3.9.16
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
+          username: ${{ secrets.ALIYUN_ACR_USERNAME }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+
+      # Oracle container-registry 的 graalvm 仓库允许匿名 pull，无需登录
+      - name: Resolve upstream tag
+        id: resolve
+        run: |
+          TAG="${{ inputs.upstream_tag }}"
+          if [ -z "$TAG" ]; then
+            # 手动触发且没传参时，取 Oracle 官方当前最新的 muslib-ol10 日期 tag
+            TAG=$(python3 - <<'PYEOF'
+          import json, re, urllib.request
+          tok = json.load(urllib.request.urlopen(
+              "https://container-registry.oracle.com/auth?service=Oracle%20Registry"
+              "&scope=repository:graalvm/native-image:pull"))["token"]
+          req = urllib.request.Request(
+              "https://container-registry.oracle.com/v2/graalvm/native-image/tags/list?n=1000",
+              headers={"Authorization": "Bearer " + tok})
+          tags = json.load(urllib.request.urlopen(req))["tags"]
+          # 匹配任何系列前缀的 *-muslib-ol10-YYYYMMDD（不锁死 25iN 命名，兼容上游命名演变）
+          pat = re.compile(r".*-muslib-ol10-\d{8}$")
+          dated = [t for t in tags if pat.match(t)]
+          if not dated:
+              raise SystemExit("no muslib-ol10 dated tags found: upstream naming may have changed")
+          print(max(dated, key=lambda t: (int(t.rsplit("-", 1)[1]), t)))
+          PYEOF
+          )
+          fi
+          SHORT_TAG="${TAG%-*}"   # 去掉日期段：25i2-25.0.4-muslib-ol10-20260728 -> 25i2-25.0.4-muslib-ol10
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT_TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$TAG"
+          echo "short_tag=$SHORT_TAG"
+
+      - name: Build image
+        env:
+          BASE_IMAGE: container-registry.oracle.com/graalvm/native-image:${{ steps.resolve.outputs.tag }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/graalvm-jdk-musl-maven-oracle
+        run: |
+          IMAGE_LOWER=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_LOWER=$IMAGE_LOWER" >> "$GITHUB_ENV"
+          docker build --build-arg BASE_IMAGE="$BASE_IMAGE" \
+                       --build-arg MAVEN_VERSION="$MAVEN_VERSION" \
+                       -t "$IMAGE_LOWER:ci-test" .
+
+      - name: Verify tools
+        run: |
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" java -version
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" native-image --version
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" mvn -version
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" git --version
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" pigz --version
+
+      - name: Smoke test (native-image build)
+        # GitHub runner 沙箱会拦截 SVM 临时 helper，不影响镜像本身；不阻断
+        continue-on-error: true
+        run: |
+          docker run --rm --security-opt seccomp=unconfined "$IMAGE_LOWER:ci-test" sh -lc 'cd /tmp \
+            && echo "public class Hello { public static void main(String[] a){ System.out.println(\"ok\"); } }" > Hello.java \
+            && javac Hello.java && native-image --no-fallback -cp . Hello && ./hello'
+
+      - name: Push image
+        env:
+          FULL: ${{ steps.resolve.outputs.tag }}
+          SHORT: ${{ steps.resolve.outputs.short }}
+        run: |
+          docker tag "$IMAGE_LOWER:ci-test" "$IMAGE_LOWER:$FULL"
+          docker tag "$IMAGE_LOWER:ci-test" "$IMAGE_LOWER:$SHORT"
+          docker tag "$IMAGE_LOWER:ci-test" "$IMAGE_LOWER:latest"
+          docker push "$IMAGE_LOWER:$FULL"
+          docker push "$IMAGE_LOWER:$SHORT"
+          docker push "$IMAGE_LOWER:latest"
+
+      # GitHub runner 在境外，只能走阿里云公网地址（VPC 内网地址仅在阿里云 VPC 内可用）
+      - name: Push image to Aliyun ACR
+        env:
+          FULL: ${{ steps.resolve.outputs.tag }}
+          SHORT: ${{ steps.resolve.outputs.short }}
+          ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
+        run: |
+          docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:$FULL"
+          docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:$SHORT"
+          docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:latest"
+          docker push "$ALIYUN_IMAGE:$FULL"
+          docker push "$ALIYUN_IMAGE:$SHORT"
+          docker push "$ALIYUN_IMAGE:latest"
+
+      - name: Record built tag
+        env:
+          FULL: ${{ steps.resolve.outputs.tag }}
+        run: |
+          echo "$FULL" > built-tag-oracle.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add built-tag-oracle.txt
+          git commit -m "build(oracle): $FULL" || echo "no change to commit"
+          # 远端可能有其他提交（如网页编辑），先 rebase 再推；push 失败则让 job 显式失败
+          git pull --rebase origin main
+          git push

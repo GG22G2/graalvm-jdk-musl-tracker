@@ -1,0 +1,60 @@
+name: check-upstream-oracle
+
+on:
+  schedule:
+    # 每天北京时间 02:47（UTC 18:47）检查一次 Oracle 官方是否发布新镜像
+    # 与社区版检查（02:37）错开 10 分钟，避免两条流水线同时 git push 互相 rebase 冲突
+    - cron: '47 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with built tag and trigger build
+        id: compare
+        run: |
+          # 取 Oracle container-registry graalvm/native-image 里最新的 *-muslib-ol10-YYYYMMDD 日期 tag
+          # Oracle registry 匿名 token 端点与 ghcr 不同：/auth?service=Oracle Registry
+          LATEST=$(python3 - <<'PYEOF'
+          import json, re, urllib.request
+          tok = json.load(urllib.request.urlopen(
+              "https://container-registry.oracle.com/auth?service=Oracle%20Registry"
+              "&scope=repository:graalvm/native-image:pull"))["token"]
+          req = urllib.request.Request(
+              "https://container-registry.oracle.com/v2/graalvm/native-image/tags/list?n=1000",
+              headers={"Authorization": "Bearer " + tok})
+          tags = json.load(urllib.request.urlopen(req))["tags"]
+          # 匹配任何系列前缀的 *-muslib-ol10-YYYYMMDD（不锁死 25iN 命名，兼容上游命名演变）
+          pat = re.compile(r".*-muslib-ol10-\d{8}$")
+          dated = [t for t in tags if pat.match(t)]
+          if not dated:
+              raise SystemExit("no muslib-ol10 dated tags found: upstream naming may have changed")
+          print(max(dated, key=lambda t: (int(t.rsplit("-", 1)[1]), t)))
+          PYEOF
+          )
+          BUILT=$(cat built-tag-oracle.txt 2>/dev/null || echo none)
+          echo "latest_upstream=$LATEST"
+          echo "built=$BUILT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          if [ "$LATEST" = "$BUILT" ]; then
+            echo "UP_TO_DATE"
+            echo "trigger=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "TRIGGER_BUILD_FOR=$LATEST"
+            echo "trigger=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger build workflow
+        if: steps.compare.outputs.trigger == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run build-oracle.yml -R "${{ github.repository }}" \
+            -f upstream_tag="${{ steps.compare.outputs.latest }}"
+          echo "build-oracle workflow triggered"
