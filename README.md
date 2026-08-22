@@ -19,15 +19,6 @@
   - tag 与官方同款：`25i2-25.0.4-muslib-ol10-20260728`（同官方日期 tag）、
     `25i2-25.0.4-muslib-ol10`（去日期短 tag）、`latest`
 
-## 需要配置的 Secrets
-
-企业版流水线推送到阿里云 ACR 需要两个仓库机密
-（Settings → Secrets and variables → Actions → New repository secret）：
-
-- `ALIYUN_ACR_USERNAME`：阿里云账号全名（如 `gg2gg2`）
-- `ALIYUN_ACR_PASSWORD`：容器镜像服务的访问凭证密码
-  （在阿里云 ACR 控制台"访问凭证"页面设置/修改）
-
 ## 使用
 
 ```bash
