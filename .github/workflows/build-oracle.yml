@@ -105,13 +105,13 @@ jobs:
           docker push "$IMAGE_LOWER:latest"
 
       # GitHub runner 在境外，只能走阿里云公网地址（VPC 内网地址仅在阿里云 VPC 内可用）
-      # 阿里云仓库固定只推 ck:graalvm-jdk-musl-maven-oracle 一个 tag，每次构建覆盖更新，不占镜像版本配额
+      # 阿里云仓库固定只推 ck:graalvm-oracle-jdk25-musl-maven 一个 tag，每次构建覆盖更新，不占镜像版本配额
       - name: Push image to Aliyun ACR
         env:
           ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
         run: |
-          docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:graalvm-jdk-musl-maven-oracle"
-          docker push "$ALIYUN_IMAGE:graalvm-jdk-musl-maven-oracle"
+          docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:graalvm-oracle-jdk25-musl-maven"
+          docker push "$ALIYUN_IMAGE:graalvm-oracle-jdk25-musl-maven"
 
       - name: Record built tag
         env:
