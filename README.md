@@ -13,8 +13,9 @@
 - 官方每发布一个新日期 tag → 对应 `check-upstream*`（每天定时）自动触发 `build*` 构建
 - 推送位置与 tag：
   - 社区版 → `ghcr.io/gg22g2/graalvm-jdk-musl-maven`
-  - 企业版 → `ghcr.io/gg22g2/graalvm-jdk-musl-maven-oracle`
+  - 企业版 → `ghcr.io/gg22g2/graalvm-jdk-musl-maven-oracle`（同官方 3 个 tag）
     和阿里云 ACR `crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck`
+    （仅固定 `latest` 一个 tag，每次构建覆盖更新）
   - tag 与官方同款：`25i2-25.0.4-muslib-ol10-20260728`（同官方日期 tag）、
     `25i2-25.0.4-muslib-ol10`（去日期短 tag）、`latest`
 

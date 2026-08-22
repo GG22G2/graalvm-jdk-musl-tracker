@@ -105,17 +105,12 @@ jobs:
           docker push "$IMAGE_LOWER:latest"
 
       # GitHub runner 在境外，只能走阿里云公网地址（VPC 内网地址仅在阿里云 VPC 内可用）
+      # 阿里云仓库只推固定 latest 一个 tag，每次构建覆盖更新，不占镜像版本配额
       - name: Push image to Aliyun ACR
         env:
-          FULL: ${{ steps.resolve.outputs.tag }}
-          SHORT: ${{ steps.resolve.outputs.short }}
           ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
         run: |
-          docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:$FULL"
-          docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:$SHORT"
           docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:latest"
-          docker push "$ALIYUN_IMAGE:$FULL"
-          docker push "$ALIYUN_IMAGE:$SHORT"
           docker push "$ALIYUN_IMAGE:latest"
 
       - name: Record built tag
