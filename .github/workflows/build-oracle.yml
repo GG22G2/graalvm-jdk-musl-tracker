@@ -108,7 +108,7 @@ jobs:
       # 阿里云仓库只推固定 latest 一个 tag，每次构建覆盖更新，不占镜像版本配额
       - name: Push image to Aliyun ACR
         env:
-          ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
+          ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/graalvm-jdk-musl-maven-oracle
         run: |
           docker tag "$IMAGE_LOWER:ci-test" "$ALIYUN_IMAGE:latest"
           docker push "$ALIYUN_IMAGE:latest"
