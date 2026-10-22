@@ -49,7 +49,26 @@ jobs:
           docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" native-image --version
           docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" mvn -version
           docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" git --version
-          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" sh -c 'command -v gzip && gzip --version | head -1'
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" bash --version | head -1
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" jq --version
+
+      - name: Assert Yunxiao requirements
+        # 云效要求自定义镜像含 bash + jq、默认用户为 root，
+        # 且会以 /bin/bash 作为 entrypoint 起容器（官方文档 custom-build-environment）
+        run: |
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" bash -lc '
+            set -e
+            for t in bash jq java javac native-image mvn git; do
+              command -v "$t" >/dev/null || { echo "缺少 $t"; exit 1; }
+            done
+            [ -x /bin/bash ] || { echo "缺少 /bin/bash"; exit 1; }
+            echo "{\"ok\":true}" | jq -e ".ok == true" >/dev/null
+            echo "uid=$(id -u) user=$(id -un)"
+            [ "$(id -u)" = "0" ] || { echo "默认用户不是 root"; exit 1; }
+            echo "云效前置检查通过"
+          '
+          echo "--- 模拟云效启动方式（entrypoint=/bin/bash）:"
+          docker run --rm --entrypoint=/bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'echo "bash entrypoint OK: $BASH_VERSION"'
 
       - name: Assert image is arm64
         # ELF e_machine 前两字节：b7 00 = AArch64，3e 00 = x86-64
