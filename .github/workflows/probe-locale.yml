@@ -1,0 +1,83 @@
+name: probe-locale
+
+on:
+  workflow_dispatch:
+
+env:
+  ALIYUN_REGISTRY: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
+  IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
+  TAG: graalvm-oracle-jdk25-arm-musl-maven
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_ACR_USERNAME }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+
+      - name: Default env (no changes)
+        run: |
+          echo "===== default env ====="
+          docker run --rm "$IMAGE:$TAG" sh -c 'echo "LANG=$LANG LC_ALL=$LC_ALL LC_CTYPE=$LC_CTYPE"; locale 2>&1 | head -5; echo "--- locale -a:"; locale -a 2>&1 | head -20'
+          docker run --rm "$IMAGE:$TAG" java -XshowSettings:properties -version 2>&1 | grep -E "file.encoding|stdout.encoding|native.encoding|sun.jnu|user.language"
+
+      - name: LC_ALL=C.utf8 as asked
+        run: |
+          echo "===== LC_ALL=C.utf8 ====="
+          docker run --rm -e LC_ALL=C.utf8 "$IMAGE:$TAG" sh -c 'echo "LC_ALL=$LC_ALL"; echo "--- locale:"; locale 2>&1 | head -8'
+
+      - name: LC_ALL=C.UTF-8
+        run: |
+          echo "===== LC_ALL=C.UTF-8 ====="
+          docker run --rm -e LC_ALL=C.UTF-8 "$IMAGE:$TAG" sh -c 'echo "LC_ALL=$LC_ALL"; echo "--- locale:"; locale 2>&1 | head -8'
+
+      - name: LC_ALL=en_US.UTF-8
+        run: |
+          echo "===== LC_ALL=en_US.UTF-8 ====="
+          docker run --rm -e LC_ALL=en_US.UTF-8 "$IMAGE:$TAG" sh -c 'echo "LC_ALL=$LC_ALL"; echo "--- locale:"; locale 2>&1 | head -8'
+
+      - name: Java behaviour under each setting
+        run: |
+          for V in "" "C.utf8" "C.UTF-8" "en_US.UTF-8" "POSIX"; do
+            echo "===== LC_ALL='$V' ====="
+            if [ -z "$V" ]; then
+              docker run --rm -v "$PWD/probe:/probe" "$IMAGE:$TAG" sh -c 'cd /probe && javac Loc.java 2>&1 | tail -2 && java -cp . Loc 2>&1'
+            else
+              docker run --rm -e LC_ALL="$V" -v "$PWD/probe:/probe" "$IMAGE:$TAG" sh -c 'cd /probe && java -cp . Loc 2>&1'
+            fi
+            echo
+          done
+
+      - name: Shell-level non-ASCII handling
+        run: |
+          for V in "C.utf8" "C.UTF-8" "POSIX"; do
+            echo "===== LC_ALL=$V : echo/grep/awk/sed on UTF-8 ====="
+            docker run --rm -e LC_ALL="$V" "$IMAGE:$TAG" sh -c '
+              printf "中文测试\n" > /tmp/u.txt
+              echo "bytes: $(wc -c < /tmp/u.txt)  chars(grep -c): $(grep -c "中文测试" /tmp/u.txt)"
+              echo "awk len: $(awk "{print length(\$0)}" /tmp/u.txt)"
+              echo "sed: $(sed "s/中文/EN/" /tmp/u.txt)"
+              echo "echo passthrough: 中文测试"
+            '
+            echo
+          done
+
+      - name: Maven/Git under LC_ALL=C.utf8
+        run: |
+          echo "===== git log with Chinese commit message ====="
+          docker run --rm -e LC_ALL=C.utf8 -v "$PWD:/w" -w /w "$IMAGE:$TAG" sh -c 'git log -1 --format="%s" 2>&1 | head -2; echo "---"; git status --short 2>&1 | head -3'
+
+      - name: Does setting LC_ALL break native-image
+        continue-on-error: true
+        run: |
+          echo "===== native-image under LC_ALL=C.utf8 ====="
+          docker run --rm --security-opt seccomp=unconfined -e LC_ALL=C.utf8 -v "$PWD/probe:/w" -w /w "$IMAGE:$TAG" sh -c '
+            echo "public class Hi { public static void main(String[] a){ System.out.println(\"中文 native 输出\"); } }" > Hi.java
+            javac Hi.java && native-image --no-fallback -cp . Hi && ./hi
+          ' 2>&1 | tail -15
