@@ -1,33 +1,38 @@
 # 只给 build-arm.yml 用：构建 linux/arm64 镜像。
 #
-# 默认基础镜像是 BellSoft Liberica NIK（JDK 25.0.4 + musl + arm64）。
-# 选它是因为 Oracle GraalVM 的 *-muslib* 系列至今全部只有 amd64，
-# 唯一同时满足「arm64 + musl + JDK 25.0.4」的上游就是 NIK。
+# 基础镜像是 Oracle GraalVM（企业版）的 arm64 变体：JDK 25.0.4 + glibc（Oracle Linux 10）。
+#   container-registry.oracle.com/graalvm/native-image:25i4-25.0.4.1.1-ol10-20260922
 #
-# 如果以后要换成 Oracle GraalVM 的 arm64（那是 glibc 版本），把下面 RUN 里的
-# apk 分支换成 microdnf 分支即可，两者都已写好。
+# 选它的理由：
+#   1. 你要求优先 Oracle GraalVM 的 arm 版本，且最好 JDK 25.0.4 —— 这个 tag 正好满足。
+#   2. Oracle 的 *-muslib-* 系列至今全部只有 amd64，arm64 只出现在 glibc 系列。
+#   3. 必须用 glibc 而不是 musl：云效会往构建环境注入自己的工具链（node16 等），
+#      那些二进制是 glibc 编译的。musl 镜像里只有 ld-musl-aarch64.so.1，没有
+#      ld-linux-aarch64.so.1，云效的 node 会直接报
+#        cannot execute: required file not found
+#      （musl 下动态链接器缺失的经典误导性报错）。Alpaquita 的 musl 仓库里也没有
+#      gcompat / libc6-compat，无法加兼容层。
+#   4. 该镜像自带 bash、microdnf、gcc 工具链和 native-image，精简掉的东西少。
 #
 # 本地构建：
 #   docker build --platform linux/arm64 -f Dockerfile.arm -t test-arm .
 #
 # 注意：阿里云云效要求自定义镜像必须包含 bash 和 jq，且默认用户为 root
 # （见 https://help.aliyun.com/zh/yunxiao/user-guide/custom-build-environment ）。
-# Alpaquita 基镜像只有 ash/sh，没有 bash 和 jq，所以这里必须显式安装，
-# 否则云效用 /bin/bash 起容器会直接报
-#   exec: "/bin/bash": stat /bin/bash: no such file or directory
-ARG BASE_IMAGE=ghcr.io/bell-sw/liberica-native-image-kit-container:jdk-25-nik-25.0.4-musl
+# 本镜像自带 bash，jq 由下面的 microdnf 装上。
+ARG BASE_IMAGE=container-registry.oracle.com/graalvm/native-image:25i4-25.0.4.1.1-ol10-20260922
 ARG MAVEN_VERSION=3.9.16
 FROM ${BASE_IMAGE}
 
 # ARG 在 FROM 之后会失效，必须在当前阶段重新声明，RUN 里才能用到它的值
 ARG MAVEN_VERSION
 
-# bash + jq 是云效的硬性要求（bash 在 core 仓库，jq 在 universe 仓库）
-RUN if command -v apk >/dev/null 2>&1; then \
+# jq 是云效的硬性要求（bash 基镜像自带）。git 供流水线拉代码/提交用。
+RUN if command -v microdnf >/dev/null 2>&1; then \
+      microdnf --nodocs --setopt=install_weak_deps=0 install -y jq git-core pigz tar gzip which \
+      && microdnf clean all; \
+    elif command -v apk >/dev/null 2>&1; then \
       apk add --no-cache bash jq git curl ca-certificates; \
-    elif command -v microdnf >/dev/null 2>&1; then \
-      microdnf --nodocs --setopt=install_weak_deps=0 install -y bash jq git-core pigz curl tar gzip; \
-      microdnf clean all; \
     elif command -v apt-get >/dev/null 2>&1; then \
       apt-get update && apt-get install -y --no-install-recommends bash jq git curl ca-certificates \
       && rm -rf /var/lib/apt/lists/*; \
@@ -39,19 +44,17 @@ RUN if command -v apk >/dev/null 2>&1; then \
  && tar -xzf /tmp/apache-maven.tgz -C /opt \
  && ln -sfn /opt/apache-maven-${MAVEN_VERSION} /opt/maven \
  && rm -f /tmp/apache-maven.tgz /opt/apache-maven-${MAVEN_VERSION}/bin/*.cmd \
- && rm -rf /var/cache/apk/* /var/cache/dnf /var/cache/yum /root/.cache /tmp/* /var/tmp/*
+ && rm -rf /var/cache/dnf /var/cache/yum /var/cache/apk/* /root/.cache /tmp/* /var/tmp/*
 
-# 注意：这里只删 man 和 src.zip，不删 jmods。删 jmods 能省几十 MB，
-# 但 native-image 在部分 GraalVM 版本上会依赖它，arm64 上不值得冒这个险。
+# 只删 man 和 src.zip，不删 jmods：native-image 在部分版本上会依赖 jmods，
+# 为省几十 MB 冒构建失败的风险不值得。
 RUN rm -rf "${JAVA_HOME}/man" "${JAVA_HOME}/lib/src.zip"
 
-# Alpaquita 的 /etc/profile 会硬编码 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"，
-# 把 PATH 整个覆盖掉。bash 的 login shell（bash -l）会读 /etc/profile，
-# 于是 mvn、java 全部从 PATH 里消失——云效正是用 bash 起容器的。
-# 这里用 profile.d 兜底（/etc/profile 在末尾会 source /etc/profile.d/*.sh），
-# 保证 login shell 下 mvn 与 JDK 依然可用。
+# 防止 login shell 下 PATH 被 /etc/profile 之类脚本覆盖导致 mvn/java 丢失。
+# Oracle Linux 的 /etc/profile 本身是追加式（不像 Alpaquita 那样直接赋值覆盖），
+# 但这里仍然加一层幂等兜底，保证云效用 bash 起容器时工具一定在 PATH 上。
 RUN printf '%s\n' \
-      '# 防止 /etc/profile 覆盖 PATH 导致 mvn/java 丢失' \
+      '# 保证 mvn 与 JDK 在 login shell 下也可用（幂等）' \
       'case ":$PATH:" in' \
       '  *:/opt/maven/bin:*) ;;' \
       '  *) export PATH="/opt/maven/bin:$PATH" ;;' \
@@ -70,7 +73,7 @@ RUN printf '%s\n' \
 COPY maven-settings.xml /opt/maven/conf/settings.xml
 
 ENV MAVEN_HOME=/opt/maven \
-    PATH=/opt/maven/bin:/usr/local/musl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/opt/maven/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WORKDIR /workspace
 ENTRYPOINT []
 # 云效会以 /bin/bash 作为 entrypoint 起容器，这里保证 bash 存在
@@ -79,7 +82,9 @@ CMD ["/bin/bash"]
 
 # 构建期就把云效的前提卡死，缺任何一项直接让构建失败，不把问题留到流水线上。
 # 必须放在 ENV PATH 之后，否则 mvn 还不在 PATH 里，会被误判为缺失。
-# 同时用 bash -lc（login shell）复现云效的启动方式，确认 PATH 没被 /etc/profile 冲掉。
+# 同时用 bash -lc（login shell）复现云效的启动方式。
+# 关键一条：必须存在 glibc 动态链接器 ld-linux-aarch64.so.1，
+# 否则云效注入的 glibc 二进制（node16 等）会报 required file not found。
 RUN set -e; \
     for t in bash jq java javac native-image mvn git; do \
       command -v "$t" >/dev/null 2>&1 || { echo "缺少必需命令: $t" >&2; exit 1; }; \
@@ -87,5 +92,8 @@ RUN set -e; \
     [ -x /bin/bash ] || { echo "缺少 /bin/bash" >&2; exit 1; }; \
     echo '{"ok":true}' | jq -e '.ok == true' >/dev/null || { echo "jq 不可用" >&2; exit 1; }; \
     [ "$(id -u)" = "0" ] || { echo "默认用户不是 root" >&2; exit 1; }; \
+    { ls /usr/lib/ld-linux-aarch64.so.1 /usr/lib64/ld-linux-aarch64.so.1 /lib/ld-linux-aarch64.so.1 >/dev/null 2>&1 \
+      || ldconfig -p 2>/dev/null | grep -q 'ld-linux-aarch64'; } \
+      || { echo "缺少 glibc 动态链接器 ld-linux-aarch64.so.1，云效的 node 会跑不起来" >&2; exit 1; }; \
     bash -lc 'for t in mvn java javac native-image jq; do command -v "$t" >/dev/null || { echo "login shell 下缺少 $t" >&2; exit 1; }; done'; \
-    echo "前置检查通过: bash=$(bash --version | head -1) jq=$(jq --version) mvn=$(mvn -v | head -1)"
+    echo "前置检查通过: bash=$(bash --version | head -1) jq=$(jq --version) mvn=$(mvn -v | head -1) libc=$(ldd --version 2>&1 | head -1)"

@@ -1,6 +1,6 @@
 name: build-arm
 
-# 手动触发：构建一次 linux/arm64 的 GraalVM（Liberica NIK）+ Maven 工具镜像，
+# 手动触发：构建一次 linux/arm64 的 Oracle GraalVM + Maven 工具镜像，
 # 推送到阿里云 ACR 的固定 tag graalvm-oracle-jdk25-arm-musl-maven。
 #
 # 与 build.yml / build-oracle.yml 完全独立：本工作流不写 built-tag 文件，
@@ -10,8 +10,9 @@ on:
 
 env:
   MAVEN_VERSION: 3.9.16
-  # BellSoft NIK，JDK 25.0.4 + musl + arm64（Oracle 的 muslib 系列没有 arm64）
-  BASE_IMAGE: ghcr.io/bell-sw/liberica-native-image-kit-container:jdk-25-nik-25.0.4-musl
+  # Oracle GraalVM arm64（glibc / Oracle Linux 10），JDK 25.0.4
+  # 注意：Oracle 的 *-muslib-* 系列没有 arm64，arm64 只出现在 glibc 系列
+  BASE_IMAGE: container-registry.oracle.com/graalvm/native-image:25i4-25.0.4.1.1-ol10-20260922
   ALIYUN_REGISTRY: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
   ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
   ALIYUN_TAG: graalvm-oracle-jdk25-arm-musl-maven
@@ -55,8 +56,10 @@ jobs:
       - name: Assert Yunxiao requirements
         # 云效要求自定义镜像含 bash + jq、默认用户为 root，
         # 且会以 /bin/bash 作为 entrypoint 起容器（官方文档 custom-build-environment）。
-        # 这里用 bash -lc（login shell）复现云效行为：login shell 会读 /etc/profile，
-        # 而 Alpaquita 的 /etc/profile 会覆盖 PATH，必须确认 mvn/java 仍可用。
+        # 这里用 bash -lc（login shell）复现云效行为。
+        # 最关键的是最后一步：云效会往环境里注入自己的 glibc 二进制（node16 等），
+        # 镜像必须是 glibc（存在 ld-linux-aarch64.so.1），否则会报
+        #   cannot execute: required file not found
         run: |
           docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" bash -lc '
             set -e
@@ -67,10 +70,25 @@ jobs:
             echo "{\"ok\":true}" | jq -e ".ok == true" >/dev/null
             echo "uid=$(id -u) user=$(id -un) PATH=$PATH"
             [ "$(id -u)" = "0" ] || { echo "默认用户不是 root"; exit 1; }
+            echo "libc: $(ldd --version 2>&1 | head -1)"
+            ls -l /usr/lib/ld-linux-aarch64.so.1 || ls -l /lib/ld-linux-aarch64.so.1
             echo "云效前置检查通过"
           '
           echo "--- 模拟云效启动方式（entrypoint=/bin/bash）:"
           docker run --rm --entrypoint=/bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'echo "bash entrypoint OK: $BASH_VERSION"; mvn -v | head -1'
+
+      - name: Assert glibc binaries can actually run
+        # 直接验证 glibc 动态链接可用：编一个最小的 glibc C 程序并运行。
+        # 这一步失败就说明云效注入的 node16 一定跑不起来。
+        run: |
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" bash -lc '
+            set -e
+            printf "#include <stdio.h>\nint main(){printf(\"glibc-ok\\\\n\");return 0;}\n" > /tmp/t.c
+            cc /tmp/t.c -o /tmp/t
+            file /tmp/t | head -1
+            /tmp/t
+            echo "glibc 动态链接验证通过"
+          '
 
       - name: Assert image is arm64
         # ELF e_machine 前两字节：b7 00 = AArch64，3e 00 = x86-64
