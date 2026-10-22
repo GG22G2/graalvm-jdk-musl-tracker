@@ -41,16 +41,6 @@ RUN if command -v apk >/dev/null 2>&1; then \
  && rm -f /tmp/apache-maven.tgz /opt/apache-maven-${MAVEN_VERSION}/bin/*.cmd \
  && rm -rf /var/cache/apk/* /var/cache/dnf /var/cache/yum /root/.cache /tmp/* /var/tmp/*
 
-# 构建期就把云效的前提卡死，缺任何一项直接让构建失败，不把问题留到流水线上
-RUN set -e; \
-    for t in bash jq java javac native-image mvn git; do \
-      command -v "$t" >/dev/null 2>&1 || { echo "缺少必需命令: $t" >&2; exit 1; }; \
-    done; \
-    [ -x /bin/bash ] || { echo "缺少 /bin/bash" >&2; exit 1; }; \
-    echo '{"ok":true}' | jq -e '.ok == true' >/dev/null || { echo "jq 不可用" >&2; exit 1; }; \
-    [ "$(id -u)" = "0" ] || { echo "默认用户不是 root" >&2; exit 1; }; \
-    echo "前置检查通过: bash=$(bash --version | head -1) jq=$(jq --version)"
-
 # 注意：这里只删 man 和 src.zip，不删 jmods。删 jmods 能省几十 MB，
 # 但 native-image 在部分 GraalVM 版本上会依赖它，arm64 上不值得冒这个险。
 RUN rm -rf "${JAVA_HOME}/man" "${JAVA_HOME}/lib/src.zip"
@@ -64,3 +54,14 @@ ENTRYPOINT []
 # 云效会以 /bin/bash 作为 entrypoint 起容器，这里保证 bash 存在
 USER root
 CMD ["/bin/bash"]
+
+# 构建期就把云效的前提卡死，缺任何一项直接让构建失败，不把问题留到流水线上。
+# 必须放在 ENV PATH 之后，否则 mvn 还不在 PATH 里，会被误判为缺失。
+RUN set -e; \
+    for t in bash jq java javac native-image mvn git; do \
+      command -v "$t" >/dev/null 2>&1 || { echo "缺少必需命令: $t" >&2; exit 1; }; \
+    done; \
+    [ -x /bin/bash ] || { echo "缺少 /bin/bash" >&2; exit 1; }; \
+    echo '{"ok":true}' | jq -e '.ok == true' >/dev/null || { echo "jq 不可用" >&2; exit 1; }; \
+    [ "$(id -u)" = "0" ] || { echo "默认用户不是 root" >&2; exit 1; }; \
+    echo "前置检查通过: bash=$(bash --version | head -1) jq=$(jq --version) mvn=$(mvn -v | head -1)"
