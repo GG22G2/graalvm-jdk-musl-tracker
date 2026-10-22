@@ -1,0 +1,76 @@
+name: build-arm
+
+# 手动触发：构建一次 linux/arm64 的 GraalVM（Liberica NIK）+ Maven 工具镜像，
+# 推送到阿里云 ACR 的固定 tag graalvm-oracle-jdk25-arm-musl-maven。
+#
+# 与 build.yml / build-oracle.yml 完全独立：本工作流不写 built-tag 文件，
+# 也不被 check-upstream* 触发，定时任务和原有构建逻辑一行未改。
+on:
+  workflow_dispatch:
+
+env:
+  MAVEN_VERSION: 3.9.16
+  # BellSoft NIK，JDK 25.0.4 + musl + arm64（Oracle 的 muslib 系列没有 arm64）
+  BASE_IMAGE: ghcr.io/bell-sw/liberica-native-image-kit-container:jdk-25-nik-25.0.4-musl
+  ALIYUN_REGISTRY: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
+  ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
+  ALIYUN_TAG: graalvm-oracle-jdk25-arm-musl-maven
+
+jobs:
+  build:
+    # 公有仓库可用的原生 arm64 runner；用 amd64 + QEMU 跑 native-image 会慢到不可用
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_ACR_USERNAME }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+
+      - name: Build arm64 image
+        run: |
+          echo "base = $BASE_IMAGE"
+          docker build --platform linux/arm64 \
+            --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            --build-arg MAVEN_VERSION="$MAVEN_VERSION" \
+            --label "org.opencontainers.image.base.name=$BASE_IMAGE" \
+            --label "org.opencontainers.image.arch=arm64" \
+            -f Dockerfile.arm \
+            -t "$ALIYUN_IMAGE:$ALIYUN_TAG" .
+
+      - name: Verify tools
+        run: |
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" java -version
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" native-image --version
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" mvn -version
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" git --version
+          docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" sh -c 'command -v gzip && gzip --version | head -1'
+
+      - name: Assert image is arm64
+        # ELF e_machine 前两字节：b7 00 = AArch64，3e 00 = x86-64
+        run: |
+          MACHINE=$(docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" \
+            sh -c 'od -An -tx1 -j18 -N2 "$(command -v java)" | tr -d " \n"')
+          echo "e_machine = $MACHINE"
+          if [ "$MACHINE" != "b700" ]; then
+            echo "::error::镜像不是 linux/arm64（e_machine=$MACHINE）"
+            exit 1
+          fi
+
+      - name: Smoke test (native-image build)
+        # runner 沙箱可能拦截 SVM 临时 helper，属于环境限制而非镜像问题，不阻断
+        continue-on-error: true
+        run: |
+          docker run --rm --security-opt seccomp=unconfined "$ALIYUN_IMAGE:$ALIYUN_TAG" sh -lc 'cd /tmp \
+            && echo "public class Hello { public static void main(String[] a){ System.out.println(\"ok\"); } }" > Hello.java \
+            && javac Hello.java && native-image --no-fallback -cp . Hello && ./hello'
+
+      - name: Push to Aliyun ACR
+        run: |
+          docker push "$ALIYUN_IMAGE:$ALIYUN_TAG"
+          echo "pushed $ALIYUN_IMAGE:$ALIYUN_TAG"

@@ -40,3 +40,26 @@ docker run --rm -v "$PWD":/workspace ghcr.io/gg22g2/graalvm-jdk-musl-maven-oracl
 - `build.yml` / `build-oracle.yml`：用官方新 tag 作基础镜像构建，验证 5 个工具
   版本，推送 3 个 tag，成功后把新 tag 写回对应的 built-tag 文件。
 - 构建失败不会写 built-tag 文件，下一次 check 会自动重试。
+
+## arm64 镜像（手动触发）
+
+`build-arm.yml` 是独立的一条**手动**流水线，与上面两条定时跟踪互不影响（不读写
+built-tag 文件，不会被 check-upstream 触发）：
+
+- 基础镜像固定为 `ghcr.io/bell-sw/liberica-native-image-kit-container:jdk-25-nik-25.0.4-musl`
+  —— BellSoft Liberica NIK，JDK 25.0.4 + musl + arm64。
+- 构建定义在 `Dockerfile.arm`，同样装 Maven 3.9.16（阿里云源）+ git。
+- 在原生 arm64 runner（`ubuntu-24.04-arm`）上构建，不用 QEMU 模拟。
+- 推送目标：阿里云 ACR
+  `crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck`，
+  tag 固定 `graalvm-oracle-jdk25-arm-musl-maven`，每次构建覆盖更新。
+
+为什么不用 Oracle GraalVM：Oracle 的 `*-muslib-*` 系列 tag 至今全部只有 amd64，
+musl + arm64 的组合在 Oracle 那边不存在（arm64 只出现在 glibc 系列）。要换回
+Oracle，得接受 glibc，或者改用 GraalVM 社区版。
+
+```bash
+docker pull crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck:graalvm-oracle-jdk25-arm-musl-maven
+docker run --rm --platform linux/arm64 -v "$PWD":/workspace \
+  crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck:graalvm-oracle-jdk25-arm-musl-maven mvn -B package
+```

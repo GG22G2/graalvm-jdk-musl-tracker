@@ -1,0 +1,48 @@
+# 只给 build-arm.yml 用：构建 linux/arm64 镜像。
+#
+# 默认基础镜像是 BellSoft Liberica NIK（JDK 25.0.4 + musl + arm64）。
+# 选它是因为 Oracle GraalVM 的 *-muslib* 系列至今全部只有 amd64，
+# 唯一同时满足「arm64 + musl + JDK 25.0.4」的上游就是 NIK。
+#
+# 如果以后要换成 Oracle GraalVM 的 arm64（那是 glibc 版本），把下面 RUN 里的
+# apk 分支换成 microdnf 分支即可，两者都已写好。
+#
+# 本地构建：
+#   docker build --platform linux/arm64 -f Dockerfile.arm -t test-arm .
+ARG BASE_IMAGE=ghcr.io/bell-sw/liberica-native-image-kit-container:jdk-25-nik-25.0.4-musl
+ARG MAVEN_VERSION=3.9.16
+FROM ${BASE_IMAGE}
+
+# ARG 在 FROM 之后会失效，必须在当前阶段重新声明，RUN 里才能用到它的值
+ARG MAVEN_VERSION
+
+RUN if command -v apk >/dev/null 2>&1; then \
+      apk add --no-cache git curl ca-certificates; \
+    elif command -v microdnf >/dev/null 2>&1; then \
+      microdnf --nodocs --setopt=install_weak_deps=0 install -y git-core pigz curl tar gzip; \
+      microdnf clean all; \
+    elif command -v apt-get >/dev/null 2>&1; then \
+      apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi \
+ && curl -fL --connect-timeout 10 --retry 2 --retry-delay 3 --max-time 180 \
+      -o /tmp/apache-maven.tgz \
+      "https://mirrors.aliyun.com/apache/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+ && mkdir -p /opt /workspace \
+ && tar -xzf /tmp/apache-maven.tgz -C /opt \
+ && ln -sfn /opt/apache-maven-${MAVEN_VERSION} /opt/maven \
+ && rm -f /tmp/apache-maven.tgz /opt/apache-maven-${MAVEN_VERSION}/bin/*.cmd \
+ && rm -rf /var/cache/apk/* /var/cache/dnf /var/cache/yum /root/.cache /tmp/* /var/tmp/*
+
+# 注意：这里只删 man 和 src.zip，不删 jmods。删 jmods 能省几十 MB，
+# 但 native-image 在部分 GraalVM 版本上会依赖它，arm64 上不值得冒这个险。
+RUN rm -rf "${JAVA_HOME}/man" "${JAVA_HOME}/lib/src.zip"
+
+COPY maven-settings.xml /opt/maven/conf/settings.xml
+
+ENV MAVEN_HOME=/opt/maven \
+    PATH=/opt/maven/bin:/usr/local/musl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WORKDIR /workspace
+ENTRYPOINT []
+# Alpaquita 基镜像没有 bash，只有 ash/sh（BusyBox），这里不能用 /bin/bash
+CMD ["/bin/sh"]
