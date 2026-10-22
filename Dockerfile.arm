@@ -45,6 +45,28 @@ RUN if command -v apk >/dev/null 2>&1; then \
 # 但 native-image 在部分 GraalVM 版本上会依赖它，arm64 上不值得冒这个险。
 RUN rm -rf "${JAVA_HOME}/man" "${JAVA_HOME}/lib/src.zip"
 
+# Alpaquita 的 /etc/profile 会硬编码 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"，
+# 把 PATH 整个覆盖掉。bash 的 login shell（bash -l）会读 /etc/profile，
+# 于是 mvn、java 全部从 PATH 里消失——云效正是用 bash 起容器的。
+# 这里用 profile.d 兜底（/etc/profile 在末尾会 source /etc/profile.d/*.sh），
+# 保证 login shell 下 mvn 与 JDK 依然可用。
+RUN printf '%s\n' \
+      '# 防止 /etc/profile 覆盖 PATH 导致 mvn/java 丢失' \
+      'case ":$PATH:" in' \
+      '  *:/opt/maven/bin:*) ;;' \
+      '  *) export PATH="/opt/maven/bin:$PATH" ;;' \
+      'esac' \
+      'if [ -n "${JAVA_HOME:-}" ] && [ -d "$JAVA_HOME/bin" ]; then' \
+      '  case ":$PATH:" in' \
+      '    *:"$JAVA_HOME/bin":*) ;;' \
+      '    *) export PATH="$JAVA_HOME/bin:$PATH" ;;' \
+      '  esac' \
+      'fi' \
+      > /etc/profile.d/00-graalvm-path.sh \
+ && chmod 0644 /etc/profile.d/00-graalvm-path.sh \
+ && bash -lc 'command -v mvn >/dev/null && command -v java >/dev/null' \
+ && echo "login shell PATH 检查通过"
+
 COPY maven-settings.xml /opt/maven/conf/settings.xml
 
 ENV MAVEN_HOME=/opt/maven \
@@ -57,6 +79,7 @@ CMD ["/bin/bash"]
 
 # 构建期就把云效的前提卡死，缺任何一项直接让构建失败，不把问题留到流水线上。
 # 必须放在 ENV PATH 之后，否则 mvn 还不在 PATH 里，会被误判为缺失。
+# 同时用 bash -lc（login shell）复现云效的启动方式，确认 PATH 没被 /etc/profile 冲掉。
 RUN set -e; \
     for t in bash jq java javac native-image mvn git; do \
       command -v "$t" >/dev/null 2>&1 || { echo "缺少必需命令: $t" >&2; exit 1; }; \
@@ -64,4 +87,5 @@ RUN set -e; \
     [ -x /bin/bash ] || { echo "缺少 /bin/bash" >&2; exit 1; }; \
     echo '{"ok":true}' | jq -e '.ok == true' >/dev/null || { echo "jq 不可用" >&2; exit 1; }; \
     [ "$(id -u)" = "0" ] || { echo "默认用户不是 root" >&2; exit 1; }; \
+    bash -lc 'for t in mvn java javac native-image jq; do command -v "$t" >/dev/null || { echo "login shell 下缺少 $t" >&2; exit 1; }; done'; \
     echo "前置检查通过: bash=$(bash --version | head -1) jq=$(jq --version) mvn=$(mvn -v | head -1)"
