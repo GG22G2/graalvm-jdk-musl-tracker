@@ -1,0 +1,22 @@
+name: tmp-verify
+on:
+  workflow_dispatch:
+env:
+  R: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
+  IMG: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck:graalvm-oracle-jdk25-arm-musl-maven
+jobs:
+  v:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.R }}
+          username: ${{ secrets.ALIYUN_ACR_USERNAME }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+      - name: Pull from Aliyun and simulate Yunxiao exactly
+        run: |
+          docker rmi "$IMG" 2>/dev/null || true
+          docker pull "$IMG"
+          docker image inspect "$IMG" --format 'arch={{.Architecture}} os={{.Os}} user={{.Config.User}}'
+          echo "--- 云效启动方式：entrypoint=/bin/bash, 工作目录 /root/workspace"
+          docker run --rm -w /root/workspace --entrypoint=/bin/bash "$IMG" -lc 'set -e; echo "bash=$BASH_VERSION"; echo "PATH=$PATH"; echo "uid=$(id -u)"; for t in bash jq java javac native-image mvn git; do command -v $t || { echo "MISSING $t"; exit 1; }; done; jq --version; mvn -v | head -1; echo ALL_OK'
