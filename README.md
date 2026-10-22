@@ -47,8 +47,8 @@ docker run --rm -v "$PWD":/workspace ghcr.io/gg22g2/graalvm-jdk-musl-maven-oracl
 built-tag 文件，不会被 check-upstream 触发）：
 
 - 基础镜像固定为
-  `container-registry.oracle.com/graalvm/native-image:25i4-25.0.4.1.1-ol10-20260922`
-  —— Oracle GraalVM（企业版）arm64，**JDK 25.0.4 + glibc（Oracle Linux 10）**。
+  `container-registry.oracle.com/graalvm/native-image:25i4-25.0.4.1.1-ol8-20260922`
+  —— Oracle GraalVM（企业版）arm64，**JDK 25.0.4 + glibc 2.28（Oracle Linux 8）**。
 - 构建定义在 `Dockerfile.arm`，装 jq + git + Maven 3.9.16（阿里云源）。
 - 在原生 arm64 runner（`ubuntu-24.04-arm`）上构建，不用 QEMU 模拟。
 - 推送目标：阿里云 ACR
@@ -75,6 +75,36 @@ glibc 系列。而更关键的是，**musl 镜像在云效上根本跑不起来*
 而 Alpaquita 的 musl 仓库里**没有 `gcompat` / `libc6-compat`**，加不了兼容层，
 所以只能换 glibc。已实测验证：同一个官方 glibc node16 arm64 二进制，
 在 glibc 镜像里输出 `node v16.20.2` / `npm 8.19.4`，在旧的 musl 镜像里失败。
+
+### 为什么用 ol8 而不是 ol10（glibc 版本决定产物能跑在哪台机器上）
+
+目标部署机是**银河麒麟 V10 SP1**（基于 Ubuntu 20.04，glibc **2.31**）。
+glibc 是**向后兼容、不向前兼容**的：在 glibc 2.39 上编译的二进制，拿到 2.31
+的机器上会因为找不到符号而直接报
+
+```
+version `GLIBC_2.34' not found
+```
+
+Oracle GraalVM 的 arm64 提供三个 Oracle Linux 变体（**三个都有 arm64**，只有
+glibc 版本不同）：
+
+| 变体 | glibc | 对麒麟 2.31 |
+|---|---|---|
+| `ol8` | **2.28** | **安全** ← 当前使用 |
+| `ol9` | 2.34 | 有风险（2.34 > 2.31） |
+| `ol10` | 2.39 | 会失败 |
+
+因此基础镜像固定用 `ol8`。构建期有两道断言把这个约束卡死：
+
+- `Dockerfile.arm`：构建机 glibc 必须 ≤ 2.31，否则构建失败（防止以后误换回 ol9/ol10）
+- `build-arm.yml`：**真编一个 native-image 产物**，用 `readelf --version-info` 读出它
+  引用的最高 GLIBC 符号版本，超过 2.31 就让构建失败，不推镜像
+
+实测结果：产物最高只引用 **GLIBC_2.17**，远低于目标机的 2.31，余量充足。
+
+如果目标机的 glibc 不是 2.31（比如换了系统版本），改 `build-arm.yml` 里的
+`TARGET_GLIBC` 和 `BASE_IMAGE` 两个值即可。
 
 ### 给云效（Yunxiao）流水线用
 
