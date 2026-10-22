@@ -1,0 +1,58 @@
+name: tmp-static
+on:
+  workflow_dispatch:
+env:
+  R: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
+  IMG: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck:graalvm-oracle-jdk25-arm-musl-maven
+jobs:
+  t:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.R }}
+          username: ${{ secrets.ALIYUN_ACR_USERNAME }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+      - name: Pull image from Aliyun
+        run: |
+          docker rmi "$IMG" 2>/dev/null || true
+          docker pull "$IMG"
+      - name: Inspect JDK static libs
+        run: |
+          docker run --rm --entrypoint=/bin/bash "$IMG" -lc '
+            echo "JAVA_HOME=$JAVA_HOME"
+            echo "--- lib/static 下的平台目录:"
+            ls -1 "$JAVA_HOME/lib/static/" 2>/dev/null || echo "(no lib/static)"
+            echo "--- linux-aarch64 下有哪些 libc:"
+            ls -1 "$JAVA_HOME/lib/static/linux-aarch64/" 2>/dev/null || echo "(none)"
+          '
+      - name: "TEST 1: --static --libc=musl (用户当前用法, 预期失败)"
+        continue-on-error: true
+        run: |
+          docker run --rm --entrypoint=/bin/bash "$IMG" -lc '
+            cd /tmp
+            echo "public class H { public static void main(String[] a){ System.out.println(\"ok\"); } }" > H.java
+            javac H.java
+            native-image --static --libc=musl --no-fallback -cp . H 2>&1 | tail -20
+          ' || echo "TEST1_RESULT=FAILED"
+      - name: "TEST 2: 默认动态链接 (预期成功)"
+        continue-on-error: true
+        run: |
+          docker run --rm --entrypoint=/bin/bash "$IMG" -lc '
+            cd /tmp
+            echo "public class H { public static void main(String[] a){ System.out.println(\"ok\"); } }" > H.java
+            javac H.java
+            native-image --no-fallback -cp . H 2>&1 | tail -6
+            ./h && echo "TEST2_RESULT=OK 动态链接可用"
+          ' || echo "TEST2_RESULT=FAILED"
+      - name: "TEST 3: --static-nolibc (mostly-static, glibc 上是否可用)"
+        continue-on-error: true
+        run: |
+          docker run --rm --entrypoint=/bin/bash "$IMG" -lc '
+            cd /tmp
+            echo "public class H { public static void main(String[] a){ System.out.println(\"ok\"); } }" > H.java
+            javac H.java
+            native-image --static-nolibc --no-fallback -cp . H 2>&1 | tail -8
+            ldd ./h 2>&1 | head -3
+            ./h && echo "TEST3_RESULT=OK mostly-static 可用"
+          ' || echo "TEST3_RESULT=FAILED"
