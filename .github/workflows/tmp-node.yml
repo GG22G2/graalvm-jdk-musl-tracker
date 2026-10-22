@@ -4,6 +4,7 @@ on:
 env:
   R: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
   IMG: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck:graalvm-oracle-jdk25-arm-musl-maven
+  MUSL_BASE: ghcr.io/bell-sw/liberica-native-image-kit-container:jdk-25-nik-25.0.4-musl
 jobs:
   t:
     runs-on: ubuntu-24.04-arm
@@ -13,26 +14,29 @@ jobs:
           registry: ${{ env.R }}
           username: ${{ secrets.ALIYUN_ACR_USERNAME }}
           password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
-      - name: Pull from Aliyun (no local cache)
+      - name: Pull new image from Aliyun (no local cache)
         run: |
           docker rmi "$IMG" 2>/dev/null || true
           docker pull "$IMG"
           docker image inspect "$IMG" --format 'arch={{.Architecture}} os={{.Os}} user={{.Config.User}}'
-      - name: Reproduce Yunxiao node16 failure mode with a REAL glibc node binary
-        # 云效注入的 node16 是 glibc 编译的。这里直接下官方 node arm64 (glibc) 二进制，
-        # 放进镜像里运行 —— 这是对 musl/glibc 问题的决定性验证。
+      - name: Get real glibc node16 arm64 binary
         run: |
           curl -fsSL -o /tmp/node.tgz https://nodejs.org/dist/v16.20.2/node-v16.20.2-linux-arm64.tar.gz
           tar -xzf /tmp/node.tgz -C /tmp
-          echo "--- 宿主机上 file:"
           file /tmp/node-v16.20.2-linux-arm64/bin/node
-          echo "--- 在镜像里运行（模拟云效）:"
-          docker run --rm -v /tmp/node-v16.20.2-linux-arm64:/opt/node16 --entrypoint=/bin/bash "$IMG" -lc '
-            set -e
-            /opt/node16/bin/node --version
-            echo "node 运行成功（glibc 动态链接可用）"
-            /opt/node16/bin/npm --version
-          '
-      - name: Also verify in login shell + jq works
+      - name: "A) NEW glibc image: run node16 + npm (simulate Yunxiao)"
         run: |
-          docker run --rm --entrypoint=/bin/bash "$IMG" -lc 'echo "{\"a\":1}" | jq -e ".a==1" >/dev/null && echo "jq 功能正常"; jq --version'
+          docker run --rm -v /tmp/node-v16.20.2-linux-arm64:/opt/node16 \
+            -e PATH=/opt/node16/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            --entrypoint=/bin/bash "$IMG" -lc '
+              set -e
+              echo "node: $(node --version)"
+              echo "npm : $(npm --version)"
+              echo "A_RESULT=OK glibc node16 可正常运行"
+          '
+      - name: "B) OLD musl image: same node16 (expected to FAIL)"
+        continue-on-error: true
+        run: |
+          docker run --rm -v /tmp/node-v16.20.2-linux-arm64:/opt/node16 \
+            -e PATH=/opt/node16/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            --entrypoint=/bin/sh "$MUSL_BASE" -c 'node --version' 2>&1 || echo "B_RESULT=FAILED（复现了云效的报错）"
