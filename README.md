@@ -58,6 +58,25 @@ built-tag 文件，不会被 check-upstream 触发）：
 musl + arm64 的组合在 Oracle 那边不存在（arm64 只出现在 glibc 系列）。要换回
 Oracle，得接受 glibc，或者改用 GraalVM 社区版。
 
+### 给云效（Yunxiao）流水线用
+
+云效对自定义镜像有三条硬性要求（见
+[官方文档](https://help.aliyun.com/zh/yunxiao/user-guide/custom-build-environment)）：
+**必须包含 bash 和 jq，默认用户必须是 root**，并且它会用 `/bin/bash` 作为
+entrypoint 起容器。本镜像已按此处理：
+
+- 基镜像 Alpaquita 只有 ash/sh，**没有 bash 和 jq**，所以 Dockerfile 显式
+  `apk add bash jq`（bash 在 core 仓库，jq 在 universe 仓库）。
+  缺 bash 时云效会直接报
+  `exec: "/bin/bash": stat /bin/bash: no such file or directory`。
+- 基镜像的 `/etc/profile` 第 1 行是
+  `export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"`，会**整个覆盖
+  PATH**。云效用 bash 起容器，login shell 读到它之后 `mvn`、`java` 就都从 PATH
+  里消失了。镜像里加了 `/etc/profile.d/00-graalvm-path.sh` 兜底
+  （`/etc/profile` 末尾会 source `profile.d/*.sh`）。
+- Dockerfile 构建期会断言 bash/jq/java/native-image/mvn/git 齐全、uid=0，
+  并用 `bash -lc` 复现云效的 login shell，缺任何一项直接构建失败。
+
 ```bash
 docker pull crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck:graalvm-oracle-jdk25-arm-musl-maven
 docker run --rm --platform linux/arm64 -v "$PWD":/workspace \
