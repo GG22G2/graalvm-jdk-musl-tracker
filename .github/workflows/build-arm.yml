@@ -64,12 +64,20 @@ jobs:
         # 最关键的是最后一步：云效会往环境里注入自己的 glibc 二进制（node16 等），
         # 镜像必须是 glibc（存在 ld-linux-aarch64.so.1），否则会报
         #   cannot execute: required file not found
+        # 工具清单这行是踩过坑加的：ol8 的 slim 基础镜像没有 find/xargs，
+        # 云效的 step-user-*.sh 第 5 行就用 find，结果 exit 127、构建白跑 4 分钟。
         run: |
           docker run --rm "$ALIYUN_IMAGE:$ALIYUN_TAG" bash -lc '
             set -e
-            for t in bash jq java javac native-image mvn git; do
+            for t in bash jq java javac native-image mvn git readelf \
+                     find xargs awk sed grep tar gzip zip unzip file ps hostname \
+                     ssh scp rsync patch diff xz bzip2 less wget; do
               command -v "$t" >/dev/null || { echo "缺少 $t"; exit 1; }
             done
+            # 不只查在不在，还要真跑一下：云效脚本里 find 是直接调用的
+            find /tmp -maxdepth 1 >/dev/null
+            echo x | xargs -I{} true
+            tar --version | head -1; gzip --version | head -1; unzip -v | head -1; file --version | head -1
             [ -x /bin/bash ] || { echo "缺少 /bin/bash"; exit 1; }
             echo "{\"ok\":true}" | jq -e ".ok == true" >/dev/null
             echo "uid=$(id -u) user=$(id -un) PATH=$PATH"

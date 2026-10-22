@@ -49,7 +49,8 @@ built-tag 文件，不会被 check-upstream 触发）：
 - 基础镜像固定为
   `container-registry.oracle.com/graalvm/native-image:25i4-25.0.4.1.1-ol8-20260922`
   —— Oracle GraalVM（企业版）arm64，**JDK 25.0.4 + glibc 2.28（Oracle Linux 8）**。
-- 构建定义在 `Dockerfile.arm`，装 jq + git + Maven 3.9.16（阿里云源）。
+- 构建定义在 `Dockerfile.arm`，装 jq + git + Maven 3.9.16（阿里云源），
+  以及云效步骤脚本要用的一批命令行工具（见下）。
 - 在原生 arm64 runner（`ubuntu-24.04-arm`）上构建，不用 QEMU 模拟。
 - 推送目标：阿里云 ACR
   `crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck`，
@@ -114,13 +115,31 @@ glibc 版本不同）：
 entrypoint 起容器。本镜像已按此处理：
 
 - 基础镜像自带 bash（`/usr/bin/bash`），jq 由 `microdnf` 装上
-  （OL10 baseos 仓库里有 jq）。
+  （OL8 的 jq / git / wget 在 appstream 仓库，该仓库默认启用）。
 - 另加 `/etc/profile.d/00-graalvm-path.sh` 幂等兜底，防止 login shell 下
   PATH 被覆盖导致 `mvn` / `java` 丢失（Oracle Linux 的 `/etc/profile` 本身是
   追加式的，不像 Alpaquita 那样直接赋值覆盖，但兜底无害）。
-- Dockerfile 构建期会断言：bash/jq/java/native-image/mvn/git 齐全、uid=0、
-  **存在 `ld-linux-aarch64.so.1`**，并且**实编一个 glibc C 程序并运行**，
-  确认动态链接真的可用 —— 缺任何一项直接构建失败，不把问题留到云效上。
+- Dockerfile 构建期会断言：bash/jq/java/native-image/mvn/git/readelf 及下面那批
+  命令行工具齐全、`find` 能真正跑起来、uid=0、**存在 `ld-linux-aarch64.so.1`**，
+  并且**实编一个 glibc C 程序并运行**，确认动态链接真的可用 —— 缺任何一项直接
+  构建失败，不把问题留到云效上。
+
+### 为什么要额外装一批命令行工具（findutils 等）
+
+云效的步骤脚本（`step-user-*.sh`）是它自己生成的，里面直接调用 `find` 这类命令，
+而 **ol8 的 slim 基础镜像里没有 findutils**：实测 base layer 的 `/usr/bin` 只有
+208 项，`find`、`xargs`、`ps`、`ssh`、`unzip` 都不在（ol10 的基础层里则有
+`find` / `xargs`）。所以从 ol10 换到 ol8 之后，云效流水线在 Maven 构建成功之后
+直接倒在下一步：
+
+```
+scripts/step-user-3.sh: line 5: find: command not found
+[ERROR] run user script failed, exit code: 127
+```
+
+因此 `Dockerfile.arm` 里显式装了这批工具：`findutils gawk sed grep diffutils patch
+tar gzip pigz xz bzip2 zip unzip file which less hostname procps-ng openssh-clients
+rsync ca-certificates tzdata binutils`，构建期逐条断言，缺任何一条都不推镜像。
 
 ```bash
 docker pull crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck:graalvm-oracle-jdk25-arm-musl-maven
