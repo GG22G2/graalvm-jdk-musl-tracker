@@ -1,0 +1,304 @@
+# =============================================================================
+# Oracle `*-muslib-ol10` 的 arm64 等价物
+#
+# 目标（与 amd64 的 container-registry.oracle.com/graalvm/native-image:*-muslib-ol10
+# 行为一致）：
+#   1. 基础是 Oracle Linux 10 的 glibc 用户空间 —— 依赖 glibc 的程序能正常跑
+#      （存在 /lib64/ld-linux-aarch64.so.1，ldd/动态链接可用）
+#   2. 同时提供 musl 工具链 /usr/local/musl，且 native-image 默认按 musl 编译
+#      （--libc=musl 可用，CC 指向 musl-gcc），能产出完全静态的 aarch64 可执行文件
+#
+# 为什么不能直接拿 Oracle 的 muslib-ol10：该系列至今只有 amd64，
+# arm64 只在 glibc 系列（ol8/ol9/ol10）里存在。
+#
+# 为什么不是"在 arm64 glibc 镜像里装个 musl 工具链"就完事：
+#   GraalVM 的 --libc=musl 需要 **按 musl 编好的 JDK 静态库**
+#   （lib/static/<os>-<arch>/musl/{libjava,libnio,libnet,...}.a，用于 --static 全静态链接）。
+#   实测（2026-10-23）：
+#     - GraalVM Community aarch64 发行包：只有 lib/static/linux-aarch64/glibc
+#     - Oracle GraalVM aarch64 发行包：同样只有 lib/static/linux-aarch64/glibc
+#     - Oracle 自己的 aarch64 RPM（yum.oracle.com graalvm/community/aarch64）：
+#       rpm2cpio | cpio -t 过滤 lib/static 结果 = 78 项，全部在 linux-aarch64/glibc 下
+#     - amd64 发行包：lib/static/linux-amd64/{glibc,musl} 两份齐全
+#   所以 aarch64 上缺的是 musl 那套静态 JDK 库，不是缺编译器。
+#   只补编译器的话，native-image 会在 [1/8] 直接报：
+#     Error: Building images on LINUX_AARCH64 (target libc: musl) is not supported
+#            Missing libraries: java, nio, net
+#            (search path: <JAVA_HOME>/lib/static/linux-aarch64/musl)
+#
+# 解决办法：用 BellSoft Liberica NIK 的 aarch64-musl 发行包里那套静态 JDK 库，
+#   补进 Oracle GraalVM 的 lib/static/linux-aarch64/musl/。
+#   NIK 是同一份 GraalVM 代码库的商业发行版，官方就出 aarch64+musl 组合
+#   （另有 aarch64+glibc、amd64+musl 等），其 lib/static/linux-aarch64/musl 下有 42 个 .a。
+#
+# 实测结论（47.111.136.59，Ubuntu 24.04 aarch64，真机非模拟）：
+#   补上之后 `native-image --libc=musl --static` 成功产出
+#     ELF 64-bit LSB pie executable, ARM aarch64, static-pie linked
+#     ldd -> statically linked
+#   在本机直接运行输出正确。
+#
+# 关于 x86_64-linux-musl-gcc 这个软链（重要，不是笔误）：
+#   GraalVM 25 的 driver 里 musl 交叉编译的编译器名是**硬编码**的，
+#   见 oracle/graal 的 HostedMuslLibC.getTargetCompiler()：
+#       return isCrossCompiling() ? "x86_64-linux-musl-gcc" : "gcc";
+#   （历史上该处曾按目标架构返回 amd64/aarch64 两种名字，后来被简化成只认 x86_64。）
+#   于是 aarch64 上 native-image 会去找 PATH 里的 x86_64-linux-musl-gcc，
+#   找不到就报 "Default native-compiler executable 'x86_64-linux-musl-gcc' not found"。
+#   实际编译器本身是好的：x86_64 这个名字纯粹被当成一个 PATH 上的可执行文件名，
+#   真正跑起来的是 aarch64 版 gcc（NIK 的 aarch64 musl 镜像也是同样处理）。
+#
+# 为什么这个名字是一个包装脚本、而不是直接软链到 aarch64-linux-musl-gcc：
+#   这里用的 musl.cc 工具链是 --enable-default-pie 编的（musl.cc 的 aarch64 native
+#   工具链 configure 行里带 --enable-default-pie --enable-static-pie），于是它默认
+#   产出 PIE。对纯 C 的小程序没问题，但对 native-image 的真实产物会在链接期炸：
+#     /usr/local/musl/bin/ld: read-only segment has dynamic relocations
+#     collect2: error: ld returned 1 exit status
+#   触发条件是产物里出现需要重定位的只读段（实测带 java.net.InetAddress 这种
+#   会用 getaddrinfo 的应用必现）。原因见 native-image 自己的链接代码
+#   CCLinkerInvocation.BinutilsCCLinkerInvocation：它固定加 "-z text"
+#   （注释写着"否则镜像在 SELinux 上跑不起来"），即禁止只读段重定位；
+#   而 PIE 链接（musl gcc 默认）会往只读段塞重定位，两者直接冲突。
+#   实测对照：
+#     --static 默认（PIE）        -> 链接失败 read-only segment has dynamic relocations
+#     -Wl,-z,notext（允许重定位） -> 链接过了但一运行就 Segmentation fault
+#     -no-pie                     -> 成功，且产物是真正的 statically linked（非 PIE）
+#   Oracle 官方 amd64 的 muslib-ol10 用自家 musl 工具链（gcc 10.2.1）不踩这个坑，
+#   所以它不需要任何额外参数。这里用包装脚本在编译/链接时补上 -no-pie，
+#   让 `native-image --libc=musl --static` 在不带任何额外参数的情况下也能正常出产物。
+#   （也可以由调用方传 --native-compiler-path=<...>/aarch64-linux-musl-gcc
+#     并自行加 -H:NativeLinkerOption=-no-pie，但默认可用更符合"与 Oracle 镜像一致"。）
+#
+# 关于 PATH 里 musl 放在系统目录之后（与 Oracle amd64 镜像的顺序不同）：
+#   Oracle 的 amd64 muslib-ol10 把 /usr/local/musl/bin 放在 PATH 最前。在 aarch64 上
+#   这样做会有一个副作用：musl 工具链的 bin 里有名为 `ld` 和 `gcc` 的可执行文件，
+#   放在最前就会把 **所有** 编译（包括 glibc 程序的常规编译）都劫持到 musl 的 ld，
+#   于是 glibc 程序一编就报
+#     /usr/local/musl/bin/ld: .../liblto_plugin.so: error loading plugin: Dynamic loading not supported
+#   这和"镜像里 glibc 程序能正常跑/正常编译"的目标冲突。
+#   所以这里把 /usr/local/musl/bin 放到系统目录之后：裸 `gcc`/`ld`/`cc` 是 glibc 的，
+#   native-image 编 musl 时由它自己按 TOOLCHAIN_DIR 和硬编码名
+#   x86_64-linux-musl-gcc 去找 musl 编译器，不依赖 PATH 顺序。
+#   两种顺序都实测能产出可运行的 musl 静态二进制，这里选了不牺牲 glibc 的那种。
+#   如果确实需要 Oracle 那种顺序，把下面 ENV PATH 里 /usr/local/musl/bin 挪到最前即可。
+#
+# 组件版本（都可被 --build-arg 覆盖）：
+#   BASE_IMAGE     oraclelinux:10-slim（arm64），与 amd64 的 ol10 基线对齐
+#   GRAALVM_URL    Oracle GraalVM（企业版）JDK 25 aarch64，glibc 版
+#   NIK_URL        BellSoft Liberica NIK 25 aarch64 musl 发行包（只取其中的 musl 静态 JDK 库）
+#   MUSL_URL       musl.cc 的 aarch64-linux-musl-native 工具链
+# =============================================================================
+
+ARG BASE_IMAGE=oraclelinux:10-slim
+
+FROM ${BASE_IMAGE}
+
+ARG GRAALVM_URL=https://download.oracle.com/graalvm/25/latest/graalvm-jdk-25_linux-aarch64_bin.tar.gz
+ARG NIK_URL=https://github.com/bell-sw/LibericaNIK/releases/download/25.0.4.1%2B1-25.0.4.1%2B2/bellsoft-liberica-vm-openjdk25.0.4.1%2B2-25.0.4.1%2B1-linux-aarch64-musl.tar.gz
+ARG MUSL_URL=https://musl.cc/aarch64-linux-musl-native.tgz
+ARG ZLIB_URL=https://zlib.net/fossils/zlib-1.2.11.tar.gz
+ARG MAVEN_VERSION=3.9.16
+
+ENV LANG=en_US.UTF-8 \
+    TOOLCHAIN_DIR=/usr/local/musl \
+    JAVA_HOME=/opt/graalvm \
+    PATH=/opt/graalvm/bin:/opt/maven/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/musl/bin
+
+ENV MAVEN_HOME=/opt/maven
+
+# CC 固定成 glibc 的 gcc（与 Oracle amd64 muslib-ol10 里的 CC=/bin/gcc 同义）。
+ENV CC=/usr/bin/gcc
+
+WORKDIR /app
+
+# -----------------------------------------------------------------------------
+# 1) glibc 侧的构建工具 + 云效（Yunxiao）对自定义镜像的硬性要求
+#    云效要求镜像必须有 bash 和 jq、默认用户是 root，并用 /bin/bash 起容器。
+#    ol10-slim 自带 bash；jq/git/wget 在 ol10_appstream（默认启用）。
+#    find/xargs/ps 这类命令 slim 基础层里没有，云效的 step-user-*.sh 会直接调用，
+#    缺了会在流水线中段 exit 127，所以一次性装齐。
+# -----------------------------------------------------------------------------
+RUN microdnf --nodocs --setopt=install_weak_deps=0 \
+        install -y \
+          jq git-core wget tar gzip xz bzip2 zip unzip file which less \
+          findutils gawk sed grep diffutils patch hostname procps-ng \
+          openssh-clients rsync ca-certificates tzdata binutils make gcc gcc-c++ \
+          zlib-devel \
+ && microdnf clean all \
+ && curl -fL --retry 3 --retry-delay 3 --max-time 300 \
+      -o /tmp/apache-maven.tgz \
+      "https://mirrors.aliyun.com/apache/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+ && tar -xzf /tmp/apache-maven.tgz -C /opt \
+ && ln -sfn "/opt/apache-maven-${MAVEN_VERSION}" /opt/maven \
+ && rm -f /tmp/apache-maven.tgz "/opt/apache-maven-${MAVEN_VERSION}"/bin/*.cmd \
+ && rm -rf /var/cache/dnf /var/cache/yum /tmp/* /var/tmp/*
+
+# 与 graalvm-jdk-musl-tracker 的其它镜像保持一致：Maven 走阿里云公共源
+COPY maven-settings.xml /opt/maven/conf/settings.xml
+
+# -----------------------------------------------------------------------------
+# 2) Oracle GraalVM（企业版）aarch64 —— glibc 运行时 + native-image
+#    这是镜像的 glibc 侧：依赖 glibc 的程序在这里能跑。
+#    注意选的是 **glibc** 版 GraalVM：musl 版 GraalVM 会引入 /lib/ld-musl-aarch64.so.1
+#    而把 glibc 世界搞乱，我们只要它的 glibc JDK + 自己补 musl 静态库。
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    curl -fL --retry 3 --retry-delay 3 --max-time 900 -o /tmp/graalvm.tgz "$GRAALVM_URL"; \
+    mkdir -p /opt/graalvm; \
+    tar -xzf /tmp/graalvm.tgz -C /opt/graalvm --strip-components=1; \
+    rm -f /tmp/graalvm.tgz; \
+    rm -rf "$JAVA_HOME"/man "$JAVA_HOME"/lib/src.zip; \
+    "$JAVA_HOME"/bin/java -version
+
+# -----------------------------------------------------------------------------
+# 3) musl 工具链（/usr/local/musl）
+#    与 Oracle amd64 muslib-ol10 里 /usr/local/musl 的角色一致：
+#    提供 musl 的 gcc/ld 和 musl 的 libc.a，供 native-image 产出全静态二进制。
+#    再按 amd64 镜像的做法，把 zlib 以静态方式编进工具链
+#    （native-image --static 需要静态 zlib）。
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    mkdir -p "$TOOLCHAIN_DIR"; \
+    curl -fL --retry 3 --retry-delay 3 --max-time 600 -o /tmp/musl.tgz "$MUSL_URL"; \
+    tar -xzf /tmp/musl.tgz -C /tmp; \
+    cp -a /tmp/aarch64-linux-musl-native/. "$TOOLCHAIN_DIR"/; \
+    rm -rf /tmp/musl.tgz /tmp/aarch64-linux-musl-native; \
+    curl -fL --retry 3 --retry-delay 3 --max-time 300 -o /tmp/zlib.tgz "$ZLIB_URL"; \
+    tar -xzf /tmp/zlib.tgz -C /tmp; \
+    cd /tmp/zlib-1.2.11; \
+    ./configure --prefix="$TOOLCHAIN_DIR" --static; \
+    make -j"$(nproc)" libz.a; \
+    make install; \
+    cd /; rm -rf /tmp/zlib.tgz /tmp/zlib-1.2.11; \
+    # GraalVM 25 的 driver 硬编码找 x86_64-linux-musl-gcc（见文件头说明）。
+    # 用包装脚本把名字接上：除了转发给 aarch64 musl gcc，还补一个 -no-pie
+    # —— musl.cc 的工具链默认 PIE，会和 native-image 固定的 "-z text" 冲突
+    #    （read-only segment has dynamic relocations），详见文件头说明。
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'exec /usr/local/musl/bin/aarch64-linux-musl-gcc -no-pie "$@"' \
+      > "$TOOLCHAIN_DIR"/bin/x86_64-linux-musl-gcc; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'exec /usr/local/musl/bin/aarch64-linux-musl-g++ -no-pie "$@"' \
+      > "$TOOLCHAIN_DIR"/bin/x86_64-linux-musl-g++; \
+    chmod 0755 "$TOOLCHAIN_DIR"/bin/x86_64-linux-musl-gcc "$TOOLCHAIN_DIR"/bin/x86_64-linux-musl-g++; \
+    "$TOOLCHAIN_DIR"/bin/x86_64-linux-musl-gcc --version | head -1
+
+# -----------------------------------------------------------------------------
+# 4) 关键一步：补上 aarch64 缺失的 musl 静态 JDK 库
+#    从 NIK 的 aarch64-musl 发行包里取出 lib/static/linux-aarch64/musl/*.a
+#    （libjava/libnio/libnet/libzip/libjvm/... 共 42 个），
+#    放进 Oracle GraalVM 的 lib/static/linux-aarch64/musl/。
+#    没有这一步，native-image --libc=musl 会在 [1/8] 就报
+#      "Building images on LINUX_AARCH64 (target libc: musl) is not supported
+#       ... Missing libraries: java, nio, net"
+#   同时把 NIK 的 svm/clibraries/linux-aarch64/musl/{libjvm,liblibchelper,libsvm_container}.a
+#    也覆盖过去（Oracle GraalVM 自带的这几个是 glibc 口径编的，避免混用）。
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    curl -fL --retry 3 --retry-delay 3 --max-time 1200 -o /tmp/nik.tgz "$NIK_URL"; \
+    NIK_DIR="$(tar -tzf /tmp/nik.tgz | head -1 | cut -d/ -f1)"; \
+    tar -xzf /tmp/nik.tgz -C /tmp "$NIK_DIR/lib/static" "$NIK_DIR/lib/svm/clibraries"; \
+    test -d "/tmp/$NIK_DIR/lib/static/linux-aarch64/musl"; \
+    mkdir -p "$JAVA_HOME/lib/static/linux-aarch64"; \
+    cp -a "/tmp/$NIK_DIR/lib/static/linux-aarch64/musl" "$JAVA_HOME/lib/static/linux-aarch64/"; \
+    cp -a "/tmp/$NIK_DIR/lib/svm/clibraries/linux-aarch64/musl/." "$JAVA_HOME/lib/svm/clibraries/linux-aarch64/musl/"; \
+    rm -rf /tmp/nik.tgz "/tmp/$NIK_DIR"; \
+    ls "$JAVA_HOME/lib/static/linux-aarch64/musl" | wc -l
+
+# -----------------------------------------------------------------------------
+# 5) 收尾：login shell 下 PATH 兜底 + 云效要求 root
+# -----------------------------------------------------------------------------
+RUN printf '%s\n' \
+      'case ":$PATH:" in *:/usr/local/musl/bin:*) ;; *) export PATH="/usr/local/musl/bin:$PATH" ;; esac' \
+      'case ":$PATH:" in *:/opt/graalvm/bin:*) ;; *) export PATH="/opt/graalvm/bin:$PATH" ;; esac' \
+      > /etc/profile.d/00-graalvm-path.sh \
+ && chmod 0644 /etc/profile.d/00-graalvm-path.sh
+
+# -----------------------------------------------------------------------------
+# 6) 构建期断言：任何一条不过就直接失败，不把问题留到使用方
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    # 6.1 必需命令齐全
+    for t in bash jq java javac native-image mvn git readelf \
+             find xargs awk sed grep tar gzip zip unzip file ps hostname \
+             ssh scp rsync patch diff xz bzip2 less wget gcc ld; do \
+      command -v "$t" >/dev/null 2>&1 || { echo "缺少必需命令: $t" >&2; exit 1; }; \
+    done; \
+    # 6.2 glibc 世界可用：存在 glibc 动态链接器
+    { ls /usr/lib64/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1 /lib/ld-linux-aarch64.so.1 >/dev/null 2>&1 \
+      || ldconfig -p 2>/dev/null | grep -q 'ld-linux-aarch64'; } \
+      || { echo "缺少 glibc 动态链接器 ld-linux-aarch64.so.1" >&2; exit 1; }; \
+    # 6.3 musl 工具链在位
+    test -x "$TOOLCHAIN_DIR/bin/aarch64-linux-musl-gcc"; \
+    test -x "$TOOLCHAIN_DIR/bin/x86_64-linux-musl-gcc"; \
+    test -f "$TOOLCHAIN_DIR/lib/libz.a"; \
+    test -f "$TOOLCHAIN_DIR/lib/libc.a"; \
+    # 6.4 musl 静态 JDK 库在位（本镜像存在的唯一理由）
+    #     libjvm.a 在 NIK 的 aarch64 musl 布局里位于 server/ 子目录（amd64 发行版是平铺的），
+    #     两种位置都接受；真正以哪份为准由 6.7 的实编验证说了算。
+    for a in libjava.a libnio.a libnet.a libzip.a; do \
+      test -f "$JAVA_HOME/lib/static/linux-aarch64/musl/$a" \
+        || { echo "缺少 musl 静态 JDK 库: $a" >&2; exit 1; }; \
+    done; \
+    { test -f "$JAVA_HOME/lib/static/linux-aarch64/musl/libjvm.a" \
+      || test -f "$JAVA_HOME/lib/static/linux-aarch64/musl/server/libjvm.a"; } \
+      || { echo "缺少 musl 静态 JDK 库: libjvm.a" >&2; exit 1; }; \
+    # 6.5 架构必须是 aarch64
+    M="$(od -An -tx1 -j18 -N2 "$(command -v java)" | tr -d ' \n')"; \
+    [ "$M" = "b700" ] || { echo "镜像不是 linux/arm64 (e_machine=$M)" >&2; exit 1; }; \
+    [ "$(id -u)" = "0" ] || { echo "默认用户不是 root" >&2; exit 1; }; \
+    echo "前置检查通过: $(java -version 2>&1 | head -1) | $(native-image --version 2>&1 | head -1) | libc=$(ldd --version 2>&1 | head -1)"
+
+# 6.6 真正跑一遍两条路：glibc 程序能跑，musl 程序能跑
+#     静态性用 readelf 判定（INTERP/NEEDED 均为 0），比 file 的措辞可靠：
+#     musl 产出的 static-pie 二进制 file 显示 "static-pie linked"，
+#     并不包含 "statically linked" 这个子串。
+RUN set -eux; \
+    printf '#include <stdio.h>\nint main(void){printf("glibc-ok\\n");return 0;}\n' > /tmp/g.c; \
+    /usr/bin/gcc /tmp/g.c -o /tmp/g; \
+    file /tmp/g | grep -q 'dynamically linked'; \
+    [ "$(readelf -l /tmp/g | grep -c INTERP)" = "1" ]; \
+    /tmp/g | grep -q glibc-ok; \
+    printf '#include <stdio.h>\nint main(void){printf("musl-ok\\n");return 0;}\n' > /tmp/m.c; \
+    "$TOOLCHAIN_DIR"/bin/aarch64-linux-musl-gcc -static /tmp/m.c -o /tmp/m; \
+    [ "$(readelf -l /tmp/m | grep -c INTERP)" = "0" ]; \
+    [ "$(readelf -d /tmp/m 2>/dev/null | grep -c NEEDED)" = "0" ]; \
+    /tmp/m | grep -q musl-ok; \
+    rm -f /tmp/g.c /tmp/m.c /tmp/g /tmp/m; \
+    echo "glibc 动态链接 + musl 全静态 均验证通过"
+
+# 6.7 决定性验证：真编一个 native-image 全静态 musl 产物并运行
+#     这一步才是"镜像能不能用来编 musl 静态二进制"的最终答案。
+#     特意用带 InetAddress/Files 的应用：只用最简单的 Hello 会漏掉
+#     "read-only segment has dynamic relocations" 这个只在真实产物上才出现的链接错误。
+RUN set -eux; \
+    mkdir -p /tmp/ni && cd /tmp/ni; \
+    cat > App.java <<'JAVA'
+import java.net.InetAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+public class App {
+    public static void main(String[] args) throws Exception {
+        System.out.println("net=" + InetAddress.getByName("127.0.0.1"));
+        Path p = Files.createTempFile("svm", ".txt");
+        Files.writeString(p, "musl-arm-ok");
+        System.out.println("file=" + Files.readString(p));
+        Files.delete(p);
+    }
+}
+JAVA
+    javac App.java; \
+    native-image --libc=musl --static -cp . App; \
+    [ "$(readelf -l ./app | grep -c INTERP)" = "0" ]; \
+    [ "$(readelf -d ./app 2>/dev/null | grep -c NEEDED)" = "0" ]; \
+    file ./app; \
+    ./app | grep -q musl-arm-ok; \
+    echo "native-image --libc=musl --static 验证通过（含网络/文件 API）"; \
+    cd /; rm -rf /tmp/ni
+
+# 与 Oracle amd64 的 muslib-ol10 保持一致：默认走 native-image
+ENTRYPOINT ["native-image"]
+CMD ["--version"]
+USER root
