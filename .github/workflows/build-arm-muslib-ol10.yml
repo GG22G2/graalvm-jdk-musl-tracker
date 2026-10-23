@@ -82,7 +82,9 @@ jobs:
             echo "{\"ok\":true}" | jq -e ".ok == true" >/dev/null
             [ "$(id -u)" = "0" ] || { echo "默认用户不是 root"; exit 1; }
             echo "libc: $(ldd --version 2>&1 | head -1)"
-            ls -l /usr/lib64/ld-linux-aarch64.so.1 || ls -l /lib64/ld-linux-aarch64.so.1
+            # 动态链接器位置随发行版而异，三个常见路径都接受（ol10 上是 /lib/）
+            ls -l /usr/lib64/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1 /lib/ld-linux-aarch64.so.1 2>/dev/null \
+              || ldconfig -p | grep ld-linux-aarch64
             echo "云效前置检查通过"
           '
           echo "--- 模拟云效启动方式（entrypoint=/bin/bash）:"
