@@ -1,0 +1,159 @@
+name: build-arm-muslib-ol10
+
+# 手动触发：构建 linux/arm64 的 Oracle GraalVM + musl 工具链镜像，
+# 推送到阿里云 ACR 的固定 tag graalvm-oracle-jdk25-arm-muslib-ol10-maven。
+#
+# 这是 amd64 版 `container-registry.oracle.com/graalvm/native-image:*-muslib-ol10`
+# 的 arm64 等价物。Oracle 的 *-muslib-ol10 系列至今只有 amd64，
+# arm64 只在它的 glibc 系列（ol8/ol9/ol10）里存在，所以只能自己做一份。
+#
+# 与 build.yml / build-oracle.yml / build-arm.yml 完全独立：本工作流不写
+# built-tag 文件，也不被 check-upstream* 触发。
+on:
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: '基础镜像（glibc 侧，须为 arm64）'
+        required: false
+        default: 'oraclelinux:10-slim'
+
+env:
+  MAVEN_VERSION: 3.9.16
+  BASE_IMAGE: ${{ inputs.base_image || 'oraclelinux:10-slim' }}
+  ALIYUN_REGISTRY: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
+  ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
+  ALIYUN_TAG: graalvm-oracle-jdk25-arm-muslib-ol10-maven
+
+jobs:
+  build:
+    # 原生 arm64 runner；用 amd64 + QEMU 跑 native-image 会慢到不可用
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_ACR_USERNAME }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+
+      # Dockerfile 里已经内置了一整套构建期断言（工具齐全、glibc 动态链接器在、
+      # musl 静态 JDK 库在、真编 glibc 程序、真编 musl 静态程序、
+      # 真跑一次 native-image --libc=musl --static），任何一条不过构建直接失败。
+      # 所以这里只需要 build，失败就不会往下推。
+      - name: Build arm64 musl image
+        run: |
+          echo "base = $BASE_IMAGE"
+          docker build --platform linux/arm64 \
+            --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            --build-arg MAVEN_VERSION="$MAVEN_VERSION" \
+            --label "org.opencontainers.image.base.name=$BASE_IMAGE" \
+            --label "org.opencontainers.image.arch=arm64" \
+            --label "org.opencontainers.image.description=Oracle GraalVM native-image arm64 with musl toolchain (arm64 equivalent of *-muslib-ol10)" \
+            -f Dockerfile.arm-muslib-ol10 \
+            -t "$ALIYUN_IMAGE:$ALIYUN_TAG" .
+
+      - name: Verify tools
+        run: |
+          docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'java -version'
+          docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'native-image --version'
+          docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'mvn -version'
+          docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'git --version'
+          docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'jq --version'
+          docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'aarch64-linux-musl-gcc --version | head -1'
+
+      - name: Assert Yunxiao requirements
+        # 云效对自定义镜像的硬性要求：含 bash 和 jq、默认用户 root，
+        # 且会用 /bin/bash 作为 entrypoint 起容器。
+        run: |
+          docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc '
+            set -e
+            for t in bash jq java javac native-image mvn git readelf \
+                     find xargs awk sed grep tar gzip zip unzip file ps hostname \
+                     ssh scp rsync patch diff xz bzip2 less wget; do
+              command -v "$t" >/dev/null || { echo "缺少 $t"; exit 1; }
+            done
+            find /tmp -maxdepth 1 >/dev/null
+            echo x | xargs -I{} true
+            [ -x /bin/bash ] || { echo "缺少 /bin/bash"; exit 1; }
+            echo "{\"ok\":true}" | jq -e ".ok == true" >/dev/null
+            [ "$(id -u)" = "0" ] || { echo "默认用户不是 root"; exit 1; }
+            echo "libc: $(ldd --version 2>&1 | head -1)"
+            ls -l /usr/lib64/ld-linux-aarch64.so.1 || ls -l /lib64/ld-linux-aarch64.so.1
+            echo "云效前置检查通过"
+          '
+          echo "--- 模拟云效启动方式（entrypoint=/bin/bash）:"
+          docker run --rm --entrypoint=/bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc 'echo "bash entrypoint OK: $BASH_VERSION"; mvn -v | head -1'
+
+      - name: Assert glibc programs run
+        # glibc 侧可用性：动态链接的 glibc 程序能编、能跑，且确实带 glibc 动态链接器。
+        run: |
+          docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc '
+            set -e
+            cat > /tmp/g.c <<EOF
+            #include <stdio.h>
+            int main(void){printf("glibc-ok\n");return 0;}
+            EOF
+            /usr/bin/gcc /tmp/g.c -o /tmp/g
+            file /tmp/g | head -1
+            [ "$(readelf -l /tmp/g | grep -c INTERP)" = "1" ] || { echo "glibc 产物没有动态链接器"; exit 1; }
+            /tmp/g
+            echo "glibc 动态链接验证通过"
+          '
+
+      - name: Assert musl static build works (the whole point)
+        # 决定性验证：真编一个 native-image 全静态 musl 产物并运行。
+        # 静态性用 readelf 判定：产物应是普通 statically linked（非 PIE），
+        # INTERP 和 NEEDED 都应为 0。
+        # 特意用带 InetAddress/Files 的应用：只用最简单的 Hello 会漏掉
+        # "read-only segment has dynamic relocations" 这个只在真实产物上出现的链接错误。
+        run: |
+          docker run --rm --security-opt seccomp=unconfined \
+            --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" -lc '
+              set -e
+              cd /tmp
+              cat > App.java <<JAVA
+              import java.net.InetAddress;
+              import java.nio.file.Files;
+              import java.nio.file.Path;
+
+              public class App {
+                  public static void main(String[] args) throws Exception {
+                      System.out.println("net=" + InetAddress.getByName("127.0.0.1"));
+                      Path p = Files.createTempFile("svm", ".txt");
+                      Files.writeString(p, "musl-arm-ok");
+                      System.out.println("file=" + Files.readString(p));
+                      Files.delete(p);
+                  }
+              }
+              JAVA
+              javac App.java
+              native-image --libc=musl --static -cp . App
+              file ./app | head -1
+              INTERP=$(readelf -l ./app | grep -c INTERP || true)
+              NEEDED=$(readelf -d ./app 2>/dev/null | grep -c NEEDED || true)
+              echo "INTERP=$INTERP NEEDED=$NEEDED"
+              [ "$INTERP" = "0" ] || { echo "::error::产物带动态链接器，不是全静态"; exit 1; }
+              [ "$NEEDED" = "0" ] || { echo "::error::产物有 NEEDED 动态依赖，不是全静态"; exit 1; }
+              ./app | grep -q musl-arm-ok
+              echo "musl 全静态 native-image 验证通过（含网络/文件 API）"
+            '
+
+      - name: Assert image is arm64
+        # ELF e_machine 前两字节：b7 00 = AArch64，3e 00 = x86-64
+        run: |
+          MACHINE=$(docker run --rm --entrypoint /bin/bash "$ALIYUN_IMAGE:$ALIYUN_TAG" \
+            -c 'od -An -tx1 -j18 -N2 "$(command -v java)" | tr -d " \n"')
+          echo "e_machine = $MACHINE"
+          if [ "$MACHINE" != "b700" ]; then
+            echo "::error::镜像不是 linux/arm64（e_machine=$MACHINE）"
+            exit 1
+          fi
+
+      - name: Push to Aliyun ACR
+        run: |
+          docker push "$ALIYUN_IMAGE:$ALIYUN_TAG"
+          echo "pushed $ALIYUN_IMAGE:$ALIYUN_TAG"
