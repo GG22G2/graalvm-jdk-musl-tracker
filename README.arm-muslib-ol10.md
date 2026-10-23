@@ -119,9 +119,15 @@ native-image 编 musl 时由它自己按 `TOOLCHAIN_DIR` 和上面那个硬编�
 
 `Dockerfile.arm-muslib-ol10` 把上面所有约束都卡在构建期，任何一条不过就直接失败：
 
-1. 必需命令齐全（含云效要的 bash/jq、以及 find/xargs/ps/ssh/unzip 这批）
-2. 存在 glibc 动态链接器 `ld-linux-aarch64.so.1`
-3. musl 工具链在位（`aarch64-linux-musl-gcc`、`x86_64-linux-musl-gcc` 包装脚本、`libz.a`、`libc.a`）
+1. 必需命令齐全 —— 分两组：云效硬性要求 + `step-user-*.sh` 会直接调用的那批
+   （`bash` `jq` `gzip` `gunzip` `find` `xargs` `ps` `ssh` `scp` `unzip` 等，
+   漏任何一个云效流水线都会中途 exit 127），以及 native-image 工具链自用
+   （`cc` `gcc` `ld` `make` `readelf` `objdump` `nm` `ar` `strip`）。
+   其中 `gzip`/`find`/`xargs`/`jq` 不只查存在，还会真跑一遍；
+   并在 `bash -lc`（login shell，复现云效启动方式）下再查一次 `mvn`/`java`/`jq`/`gzip`
+2. 存在 glibc 动态链接器 `ld-linux-aarch64.so.1`（三个候选路径任一）
+3. musl 工具链在位（`aarch64-linux-musl-gcc`、`x86_64-linux-musl-gcc` 包装脚本、`libz.a`、`libc.a`），
+   且下载的 musl 工具链 **sha256 与预期一致**（防止镜像源内容被替换）
 4. musl 静态 JDK 库在位（`libjava/libnio/libnet/libzip/libjvm`）
 5. `java` 的 ELF `e_machine` 是 `b700`（AArch64），默认用户 uid=0
 6. 真编一个 glibc 动态程序并运行（断言带 INTERP），真编一个 musl 全静态程序并运行
@@ -134,12 +140,26 @@ native-image 编 musl 时由它自己按 `TOOLCHAIN_DIR` 和上面那个硬编�
 ## 实测结果（47.111.136.59，Ubuntu 24.04 aarch64，真机非 QEMU）
 
 - 镜像 `linux/arm64`，约 1.5 GB
-- glibc 侧：`ldd (GNU libc) 2.39`，`/usr/bin/gcc` 编出的程序带 INTERP 且能跑，
-  `jq`/`sed`/`awk`/`grep` 依赖 `libc.so.6` 正常
+- glibc 侧：`ldd (GNU libc) 2.39`，动态链接器在 `/lib/ld-linux-aarch64.so.1`，
+  `/usr/bin/gcc` 编出的程序带 INTERP 且能跑，`jq`/`sed`/`awk`/`grep` 依赖 `libc.so.6` 正常
+- 云效相关：`bash`/`jq`/`gzip`/`find`/`xargs` 等全部齐备并实跑通过，
+  login shell（`/bin/bash -lc`，复现云效启动方式）下 `mvn`/`java`/`native-image` 都在
 - `native-image --libc=musl --static -cp . App`（App 用 `InetAddress` + `Files`）：
   约 3 分 20 秒，产出 `ELF 64-bit LSB executable, ARM aarch64, statically linked`，
   `INTERP=0 NEEDED=0`，运行输出正确
-- 同一产物放进 `FROM scratch` 容器里运行成功（`scratch-run-ok`）
+- 同一产物放进 `FROM scratch` 容器里运行成功
+- **CI 产物已在 ACR 上复验**：从 `crpi-xm8affxmcnbpks63.../gg22g2/ck:graalvm-oracle-jdk25-arm-muslib-ol10-maven`
+  拉取后重跑上述全部检查，均通过
+
+## 关于 musl 工具链的下载源
+
+`MUSL_URL` 默认指向 **GitHub 镜像 `musl-cc/musl.cc`**，而不是 `musl.cc` 本身 ——
+实测 GitHub Actions runner 连不上 musl.cc（`Failed to connect to musl.cc port 443`），
+但能正常访问 GitHub。
+
+该镜像的 `aarch64-linux-musl-native.tgz` 已与 musl.cc 官方原版做过 **sha256 逐字节比对，
+完全一致**（`daf336ca...8ad2a069`，85323901 字节）。Dockerfile 里用 `MUSL_SHA256`
+在构建期再校验一次，所以换成别的源只要内容一致就能用，内容不一致会直接构建失败。
 
 ## 已知边界
 
