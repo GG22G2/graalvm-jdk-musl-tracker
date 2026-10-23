@@ -274,21 +274,21 @@ RUN set -eux; \
 #     "read-only segment has dynamic relocations" 这个只在真实产物上才出现的链接错误。
 RUN set -eux; \
     mkdir -p /tmp/ni && cd /tmp/ni; \
-    cat > App.java <<'JAVA'
-import java.net.InetAddress;
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-public class App {
-    public static void main(String[] args) throws Exception {
-        System.out.println("net=" + InetAddress.getByName("127.0.0.1"));
-        Path p = Files.createTempFile("svm", ".txt");
-        Files.writeString(p, "musl-arm-ok");
-        System.out.println("file=" + Files.readString(p));
-        Files.delete(p);
-    }
-}
-JAVA
+    printf '%s\n' \
+      'import java.net.InetAddress;' \
+      'import java.nio.file.Files;' \
+      'import java.nio.file.Path;' \
+      '' \
+      'public class App {' \
+      '    public static void main(String[] args) throws Exception {' \
+      '        System.out.println("net=" + InetAddress.getByName("127.0.0.1"));' \
+      '        Path p = Files.createTempFile("svm", ".txt");' \
+      '        Files.writeString(p, "musl-arm-ok");' \
+      '        System.out.println("file=" + Files.readString(p));' \
+      '        Files.delete(p);' \
+      '    }' \
+      '}' \
+      > App.java; \
     javac App.java; \
     native-image --libc=musl --static -cp . App; \
     [ "$(readelf -l ./app | grep -c INTERP)" = "0" ]; \
