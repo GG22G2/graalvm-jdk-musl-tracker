@@ -86,6 +86,10 @@
 #   GRAALVM_URL    Oracle GraalVM（企业版）JDK 25 aarch64，glibc 版
 #   NIK_URL        BellSoft Liberica NIK 25 aarch64 musl 发行包（只取其中的 musl 静态 JDK 库）
 #   MUSL_URL       musl.cc 的 aarch64-linux-musl-native 工具链
+#                  默认走 GitHub 镜像 musl-cc/musl.cc（musl.cc 在 GitHub Actions
+#                  runner 上不可达：实测 curl 报 "Failed to connect to musl.cc port 443"）。
+#                  该镜像的 aarch64-linux-musl-native.tgz 已与 musl.cc 官方原版做过
+#                  sha256 逐字节比对，完全一致（见 MUSL_SHA256）。构建期会再校验一次。
 # =============================================================================
 
 ARG BASE_IMAGE=oraclelinux:10-slim
@@ -94,7 +98,8 @@ FROM ${BASE_IMAGE}
 
 ARG GRAALVM_URL=https://download.oracle.com/graalvm/25/latest/graalvm-jdk-25_linux-aarch64_bin.tar.gz
 ARG NIK_URL=https://github.com/bell-sw/LibericaNIK/releases/download/25.0.4.1%2B1-25.0.4.1%2B2/bellsoft-liberica-vm-openjdk25.0.4.1%2B2-25.0.4.1%2B1-linux-aarch64-musl.tar.gz
-ARG MUSL_URL=https://musl.cc/aarch64-linux-musl-native.tgz
+ARG MUSL_URL=https://github.com/musl-cc/musl.cc/releases/download/v0.0.1/aarch64-linux-musl-native.tgz
+ARG MUSL_SHA256=daf336cafa2c3c7daf42f6a46edc960f10a181fcf15ab9f1c43b192e8ad2a069
 ARG ZLIB_URL=https://zlib.net/fossils/zlib-1.2.11.tar.gz
 ARG MAVEN_VERSION=3.9.16
 
@@ -159,6 +164,7 @@ RUN set -eux; \
 RUN set -eux; \
     mkdir -p "$TOOLCHAIN_DIR"; \
     curl -fL --retry 3 --retry-delay 3 --max-time 600 -o /tmp/musl.tgz "$MUSL_URL"; \
+    echo "$MUSL_SHA256  /tmp/musl.tgz" | sha256sum -c -; \
     tar -xzf /tmp/musl.tgz -C /tmp; \
     cp -a /tmp/aarch64-linux-musl-native/. "$TOOLCHAIN_DIR"/; \
     rm -rf /tmp/musl.tgz /tmp/aarch64-linux-musl-native; \
@@ -220,11 +226,22 @@ RUN printf '%s\n' \
 # -----------------------------------------------------------------------------
 RUN set -eux; \
     # 6.1 必需命令齐全
-    for t in bash jq java javac native-image mvn git readelf \
-             find xargs awk sed grep tar gzip zip unzip file ps hostname \
-             ssh scp rsync patch diff xz bzip2 less wget gcc ld; do \
+    #     第一组是云效（Yunxiao）对自定义镜像的硬性要求 + 它的 step-user-*.sh 会直接
+    #     调用的那批命令（bash/jq/gzip 是硬要求，find/xargs/ps/ssh/unzip 等漏了就 exit 127）。
+    #     第二组是 native-image 工具链自用（cc/gcc/ld/make/binutils）。
+    for t in bash jq gzip gunzip tar zip unzip find xargs awk sed grep \
+             git curl wget rsync ssh scp diff patch xz bzip2 file which less \
+             ps hostname env date sort uniq wc tr cut tee seq sleep df du \
+             cc gcc ld make readelf objdump nm ar strip \
+             java javac native-image mvn; do \
       command -v "$t" >/dev/null 2>&1 || { echo "缺少必需命令: $t" >&2; exit 1; }; \
     done; \
+    # 6.1b 这几个不只查在不在，还要真跑起来（云效脚本里是直接调用的）
+    echo "yunxiao-gzip-check" | gzip -c | gunzip -c | grep -q yunxiao-gzip-check; \
+    find /tmp -maxdepth 1 >/dev/null; \
+    echo x | xargs -I{} true; \
+    echo '{"ok":true}' | jq -e '.ok == true' >/dev/null; \
+    bash -lc 'for t in mvn java javac native-image jq gzip; do command -v "$t" >/dev/null || { echo "login shell 下缺少 $t" >&2; exit 1; }; done'; \
     # 6.2 glibc 世界可用：存在 glibc 动态链接器
     { ls /usr/lib64/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1 /lib/ld-linux-aarch64.so.1 >/dev/null 2>&1 \
       || ldconfig -p 2>/dev/null | grep -q 'ld-linux-aarch64'; } \
