@@ -1,7 +1,7 @@
 name: build-arm
 
 # 手动触发：构建一次 linux/arm64 的 Oracle GraalVM + Maven 工具镜像，
-# 推送到阿里云 ACR 的固定 tag graalvm-oracle-jdk25-arm-musl-maven。
+# 推送到阿里云 ACR 的固定 tag graalvm-oracle-jdk25-arm-glibc-maven。
 #
 # 与 build.yml / build-oracle.yml 完全独立：本工作流不写 built-tag 文件，
 # 也不被 check-upstream* 触发，定时任务和原有构建逻辑一行未改。
@@ -19,7 +19,7 @@ env:
   TARGET_GLIBC: "2.31"
   ALIYUN_REGISTRY: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com
   ALIYUN_IMAGE: crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com/gg22g2/ck
-  ALIYUN_TAG: graalvm-oracle-jdk25-arm-musl-maven
+  ALIYUN_TAG: graalvm-oracle-jdk25-arm-glibc-maven
 
 jobs:
   build:
