@@ -10,7 +10,7 @@ Oracle GraalVM 的 3 个（amd64 musl、arm64 glibc、arm64 musl）。
 |---|---|---|---|---|---|
 | `build.yml` | `ghcr.io/gg22g2/graalvm-jdk-musl-maven` | 25 | musl | amd64 | 上游更新后自动 |
 | `build-oracle.yml` | `ghcr.io/gg22g2/graalvm-jdk-musl-maven-oracle`<br>`ACR/gg22g2/ck:graalvm-oracle-jdk25-musl-maven` | 25 | musl | amd64 | 上游更新后自动 |
-| `build-arm.yml` | `ACR/gg22g2/ck:graalvm-oracle-jdk25-arm-musl-maven` | 25 | glibc | arm64 | 手动 |
+| `build-arm.yml` | `ACR/gg22g2/ck:graalvm-oracle-jdk25-arm-gblic-maven` | 25 | glibc | arm64 | 手动 |
 | `build-arm-muslib-ol10.yml` | `ACR/gg22g2/ck:graalvm-oracle-jdk25-arm-muslib-ol10-maven` | 25 | musl | arm64 | 手动 |
 
 `ACR` = `crpi-xm8affxmcnbpks63.cn-shanghai.personal.cr.aliyuncs.com`
